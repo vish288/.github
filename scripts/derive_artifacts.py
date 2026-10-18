@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path.cwd()
 SERVER_JSON = ROOT / "server.json"
-LLMS_SPLIT_MARKER = os.environ.get("LLMS_SPLIT_MARKER", "\n## Configuration")
+LLMS_SPLIT_MARKER = os.environ.get("LLMS_SPLIT_MARKER") or "\n## Configuration"
 
 
 def derive_gemini_extension() -> str:

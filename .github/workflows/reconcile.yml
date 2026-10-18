@@ -3,8 +3,8 @@ name: Reconcile releases
 # Reusable release-reconciler for the mcp-* servers. Each server's reconcile.yml stub owns
 # the triggers (6-hourly cron, the failure path after a Publish run, manual dispatch) and
 # calls this; the github context (event name, workflow_run conclusion, repository) is the
-# caller's. The shared scripts/ci live in this repo, so they are checked out into .ci/ at
-# the exact ref of this reusable workflow (github.job_workflow_sha).
+# caller's. The shared scripts/ci live in this repo, so they are checked out into .ci/ at the
+# exact commit of this reusable workflow via the job.workflow_* contexts.
 on:
   workflow_call:
 
@@ -28,11 +28,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Guard job.workflow_sha
+        env:
+          WF_SHA: ${{ job.workflow_sha }}
+        run: '[ -n "$WF_SHA" ] || { echo "::error::job.workflow_sha is empty; cannot fetch CI scripts"; exit 1; }'
       - name: Fetch shared CI scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: vish288/.github
-          ref: ${{ github.job_workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .ci
           persist-credentials: false
-      - run: .ci/scripts/ci/reconcile.sh end
+      - run: .ci/scripts/ci/reconcile.sh

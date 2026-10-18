@@ -1,9 +1,10 @@
 name: Lint
 
-# Reusable Python lint for the mcp-* servers (ruff + optional pyright), run against the
-# caller's tree. actionlint, shellcheck and the scripts/ci self-tests are NOT run here:
-# the servers keep only thin workflow stubs and no scripts/ci, so those belong to this
-# repo's own ci.yml, which lints the real reusable workflows and shared scripts.
+# Reusable Python lint for the mcp-* servers (ruff + optional pyright) plus the PR-time
+# derived-artifacts drift check, run against the caller's tree. actionlint, shellcheck and the
+# scripts/ci self-tests run in THIS repo's ci.yml, where the real reusable workflows and shared
+# scripts live; the server stubs are small and are linted by actionlint there only indirectly,
+# so they are not re-linted here.
 on:
   workflow_call:
     inputs:
@@ -11,6 +12,13 @@ on:
         description: "Run `uv run pyright` after ruff (only servers that ship pyright)."
         type: boolean
         default: false
+      llms_split_marker:
+        description: "Heading that ends llms.txt within llms-full.txt (drift check)."
+        type: string
+        default: "\n## Configuration"
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -25,3 +33,21 @@ jobs:
       - run: uv run ruff format --check .
       - if: ${{ inputs.pyright }}
         run: uv run pyright
+      - name: Guard job.workflow_sha
+        env:
+          WF_SHA: ${{ job.workflow_sha }}
+        run: '[ -n "$WF_SHA" ] || { echo "::error::job.workflow_sha is empty; cannot fetch CI scripts"; exit 1; }'
+      - name: Fetch shared CI scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci
+          persist-credentials: false
+      - name: Derived artifacts are up to date
+        env:
+          LLMS_SPLIT_MARKER: ${{ inputs.llms_split_marker }}
+        run: |
+          python3 .ci/scripts/derive_artifacts.py
+          git diff --exit-code llms.txt gemini-extension.json \
+            || { echo "::error::llms.txt / gemini-extension.json are stale; the release pipeline derives them from server.json and llms-full.txt"; exit 1; }

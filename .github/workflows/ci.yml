@@ -23,12 +23,13 @@ jobs:
         env:
           SHELLCHECK_OPTS: -S warning
         with:
-          # -ignore job_workflow_sha: actionlint 1.7.12 does not yet know the
-          # github.job_workflow_sha context property (used to check this repo out
-          # into .ci/ at the reusable workflow's own ref). It is valid at runtime.
-          args: -color -ignore job_workflow_sha
+          # Narrow ignores for 2026-04 GitHub features that actionlint 1.7.12 (2026-03-30, the
+          # latest release) does not yet know, all valid at runtime:
+          #   job.workflow_sha / job.workflow_repository -> check this repo out into .ci/ at the
+          #     reusable workflow's own commit (docs: Contexts reference, job context).
+          #   $/.github/workflows/...  -> same-repo reusable-workflow ref (docs: Reuse workflows).
+          args: -color -ignore workflow_sha -ignore workflow_repository
       - run: shellcheck -S warning scripts/ci/*.sh
       - run: scripts/ci/retry.sh --self-test
       - run: scripts/ci/state.sh --self-test
-      - name: derive_artifacts.py parses
-        run: python3 -c "import ast; ast.parse(open('scripts/derive_artifacts.py').read())"
+      - run: python3 scripts/derive_artifacts_test.py

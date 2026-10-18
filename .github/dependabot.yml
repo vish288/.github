@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned third-party actions in the reusable workflows current. The server
+  # stubs that pin `vish288/.github/...@<sha> # v1` are bumped by each server's own
+  # github-actions Dependabot once v1 is tagged.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
