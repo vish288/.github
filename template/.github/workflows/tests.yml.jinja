@@ -1,0 +1,8 @@
+name: Tests
+# Stub: calls the reusable workflow in vish288/.github, pinned to a release commit SHA.
+on: [push, pull_request]
+jobs:
+  test:
+    uses: vish288/.github/.github/workflows/tests.yml@[[ _copier_conf.vcs_ref_hash ]] # [[ _copier_answers._commit ]]
+    with:
+      coverage_min: [[ coverage_min ]]

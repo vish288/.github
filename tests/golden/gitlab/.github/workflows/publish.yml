@@ -1,0 +1,78 @@
+name: Publish
+run-name: "Publish ${{ github.ref_name }}${{ inputs.fail_at && inputs.fail_at != 'none' && ' [fail_at]' || '' }}"
+
+# Dispatch-only: release.yml dispatches this on the new tag, so exactly one run does the work
+# and honours fail_at. reconcile.yml is the safety net for any tag not dispatched here.
+#
+# The pypi job is a TOP-LEVEL job here, not in a reusable workflow: PyPI trusted publishing
+# requires the OIDC job_workflow_ref to be this repo's publish.yml, which only holds when the
+# pypa/gh-action-pypi-publish job lives in this stub. publish-prepare.yml / publish-finish.yml
+# in vish288/.github carry everything around it.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report the state of each target; write nothing"
+        type: boolean
+        default: false
+      fail_at:
+        description: "Test hook: fail this job on attempt 1, before it writes, when its target is not done"
+        type: choice
+        options: [none, pypi, release, registry]
+        default: none
+
+# One run per tag. A duplicate (reconcile or a manual re-dispatch) waits, then finds everything done.
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prepare:
+    uses: vish288/.github/.github/workflows/publish-prepare.yml@PIN
+    with:
+      dry_run: ${{ inputs.dry_run }}
+    permissions:
+      contents: read
+      actions: read
+
+  pypi:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.pypi != 'done' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@PIN
+        with:
+          name: dist
+          path: dist
+      - name: Gate (fail_at test hook)
+        env:
+          FAIL_AT: ${{ inputs.fail_at || 'none' }}
+          PYPI_STATE: ${{ needs.prepare.outputs.pypi }}
+        run: |
+          echo "- pypi: $PYPI_STATE" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$FAIL_AT" = pypi ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "${GITHUB_RUN_ATTEMPT:-1}" = 1 ] && [ "$PYPI_STATE" != "done" ]; then
+            echo "::error::test hook fail_at=pypi (attempt 1, state=$PYPI_STATE): failing before any write"; exit 1
+          fi
+      - uses: pypa/gh-action-pypi-publish@PIN
+        continue-on-error: true   # publish-finish.yml's Confirm step is the success criterion
+        with:
+          skip-existing: true
+          print-hash: true
+
+  finish:
+    needs: [prepare, pypi]
+    if: ${{ !cancelled() && !inputs.dry_run && (needs.prepare.outputs.pypi == 'done' || needs.pypi.result == 'success') }}
+    uses: vish288/.github/.github/workflows/publish-finish.yml@PIN
+    with:
+      dry_run: ${{ inputs.dry_run }}
+      fail_at: ${{ inputs.fail_at }}
+      pypi_state: ${{ needs.prepare.outputs.pypi }}
+    permissions:
+      contents: write
+      id-token: write

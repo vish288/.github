@@ -1,0 +1,4 @@
+service: mcp-gitlab
+coverage_min: 98
+pyright: false
+llms_split_marker: "\n## Configuration"

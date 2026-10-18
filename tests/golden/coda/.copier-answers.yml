@@ -1,0 +1,8 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+coverage_min: 99
+llms_split_marker: '
+
+    ## Setup Examples'
+pyright: true
+service: mcp-coda
+

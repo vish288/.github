@@ -1,0 +1,15 @@
+name: Reconcile releases
+# Stub -> vish288/.github.
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+  workflow_dispatch:
+jobs:
+  reconcile:
+    uses: vish288/.github/.github/workflows/reconcile.yml@[[ _copier_conf.vcs_ref_hash ]] # [[ _copier_answers._commit ]]
+    permissions:
+      contents: read
+      actions: write

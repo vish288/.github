@@ -1,0 +1,8 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+coverage_min: 98
+llms_split_marker: '
+
+    ## Configuration'
+pyright: false
+service: mcp-gitlab
+

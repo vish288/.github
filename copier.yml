@@ -1,0 +1,48 @@
+_min_copier_version: "9.19"
+
+# The template proper lives in template/; copier.yml, scripts/ and tests/ stay out of the
+# rendered output.
+_subdirectory: template
+
+# Jinja's default {{ }} / {% %} / {# #} collide with GitHub Actions' ${{ }}, which the stubs
+# must emit verbatim. Switch to the bracket set so ${{ ... }} passes through untouched. The
+# answers-file *name* (template/[[ _copier_conf.answers_file ]].jinja) uses the same brackets;
+# with {{ }} Copier writes a literal-named file and later `update` fails to find the template.
+_envops:
+  block_start_string: "[%"
+  block_end_string: "%]"
+  variable_start_string: "[["
+  variable_end_string: "]]"
+  comment_start_string: "[#"
+  comment_end_string: "#]"
+  # Block tags sit on their own lines in the stubs; trim/lstrip keep them from leaving blank
+  # lines or stray indentation in the rendered YAML.
+  trim_blocks: true
+  lstrip_blocks: true
+  keep_trailing_newline: true
+
+# Escape-hatch policy (plan risk 9): nothing is skip-if-exists today — every templated file is
+# template-owned and overwritten on adoption. A repo that must diverge deletes the file; Copier
+# then leaves it out of future updates (and `recopy` restores it). _exclude stays at Copier's
+# default.
+_skip_if_exists: []
+
+service:
+  type: str
+  help: "Server repo / distribution name, e.g. mcp-argocd"
+  validator: "[% if not (service | regex_search('^mcp-[a-z-]+$')) %]must match ^mcp-[a-z-]+$[% endif %]"
+
+coverage_min:
+  type: int
+  help: "Minimum total coverage percent; the test gate fails below it"
+  default: 95
+
+pyright:
+  type: bool
+  help: "Run pyright in the lint/release gates (only servers that ship pyright)"
+  default: false
+
+llms_split_marker:
+  type: str
+  help: "Heading that ends llms.txt within llms-full.txt (passed to derive_artifacts.py)"
+  default: "\n## Configuration"

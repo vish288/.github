@@ -1,0 +1,15 @@
+name: Lint
+# Stub -> vish288/.github.
+on: [push, pull_request]
+jobs:
+  lint:
+    uses: vish288/.github/.github/workflows/lint.yml@[[ _copier_conf.vcs_ref_hash ]] # [[ _copier_answers._commit ]]
+[% if pyright or llms_split_marker != "\n## Configuration" %]
+    with:
+[% if pyright %]
+      pyright: [[ pyright | string | lower ]]
+[% endif %]
+[% if llms_split_marker != "\n## Configuration" %]
+      llms_split_marker: "[[ llms_split_marker | replace('\n', '\\n') ]]"
+[% endif %]
+[% endif %]

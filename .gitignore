@@ -1,3 +1,5 @@
 .internal/
 __pycache__/
 *.pyc
+# Transient render output from tests/render.sh / ci.yml template job.
+out/

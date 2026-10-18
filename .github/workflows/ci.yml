@@ -29,7 +29,36 @@ jobs:
           #     reusable workflow's own commit (docs: Contexts reference, job context).
           #   $/.github/workflows/...  -> same-repo reusable-workflow ref (docs: Reuse workflows).
           args: -color -ignore workflow_sha -ignore workflow_repository -ignore \$/\.github/workflows/
-      - run: shellcheck -S warning scripts/ci/*.sh
+      - run: shellcheck -S warning scripts/*.sh scripts/ci/*.sh tests/*.sh
       - run: scripts/ci/retry.sh --self-test
       - run: scripts/ci/state.sh --self-test
+      - run: scripts/fleet-update.sh --self-test
       - run: python3 scripts/derive_artifacts_test.py
+
+  # Copier template: render each committed answer set, diff against the committed golden tree,
+  # and actionlint the rendered stubs. template/ is out of this repo's own actionlint/Dependabot
+  # scope (it lives outside .github/workflows and carries .jinja suffixes), so it is linted only
+  # here, through its rendered output.
+  template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - name: Render each answer set and golden-diff
+        run: |
+          for a in tests/answers/*.yml; do
+            svc=$(basename "$a" .yml)
+            tests/render.sh "$a" "out/$svc"
+            diff -ru "tests/golden/$svc" "out/$svc" \
+              || { echo "::error::rendered $svc differs from tests/golden/$svc; run tests/regen-golden.sh and review"; exit 1; }
+          done
+      - name: actionlint the rendered stubs
+        run: |
+          mapfile -t files < <(find out -path '*/.github/workflows/*.yml' | sort)
+          docker run --rm -v "$PWD:/w" -w /w \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color "${files[@]}"
+      - name: Migration self-test (drop_tool_ruff)
+        run: uv run --with tomlkit python scripts/migrations/drop_tool_ruff.py --self-test

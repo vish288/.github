@@ -1,0 +1,4 @@
+service: mcp-coda
+coverage_min: 99
+pyright: true
+llms_split_marker: "\n## Setup Examples"

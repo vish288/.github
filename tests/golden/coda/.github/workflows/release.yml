@@ -1,0 +1,43 @@
+name: Semantic Release
+# Stub -> vish288/.github. Owns the dispatch UI and forwards inputs.
+# coda keeps its 99% coverage gate via coverage_min.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type (ignored if version is set)"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+      version:
+        description: "Explicit version (e.g. 0.6.0) — overrides bump"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Dry run (no tag/push)"
+        required: false
+        type: boolean
+        default: false
+      publish_fail_at:
+        description: "Test hook forwarded to publish.yml"
+        required: false
+        type: choice
+        options: [none, pypi, release, registry]
+        default: none
+jobs:
+  release:
+    uses: vish288/.github/.github/workflows/release.yml@PIN
+    with:
+      bump: ${{ inputs.bump }}
+      version: ${{ inputs.version }}
+      dry_run: ${{ inputs.dry_run }}
+      publish_fail_at: ${{ inputs.publish_fail_at }}
+      coverage_min: 99
+      pyright: true
+      llms_split_marker: "\n## Setup Examples"
+    secrets:
+      RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+    permissions:
+      contents: write
+      actions: write

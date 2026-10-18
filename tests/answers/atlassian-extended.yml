@@ -1,0 +1,4 @@
+service: mcp-atlassian-extended
+coverage_min: 95
+pyright: false
+llms_split_marker: "\n## Environment Variables"

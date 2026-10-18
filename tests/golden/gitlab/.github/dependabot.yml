@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
+    # Copier owns the vish288/.github stub pins (rendered from the template tag's SHA); a
+    # Dependabot bump of that ref would conflict with the next `copier update`. Dependabot
+    # keeps bumping the third-party actions that live inside vish288/.github itself.
+    ignore:
+      - dependency-name: "vish288/.github"
+      - dependency-name: "vish288/.github/*"

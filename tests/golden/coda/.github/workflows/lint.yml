@@ -1,0 +1,9 @@
+name: Lint
+# Stub -> vish288/.github.
+on: [push, pull_request]
+jobs:
+  lint:
+    uses: vish288/.github/.github/workflows/lint.yml@PIN
+    with:
+      pyright: true
+      llms_split_marker: "\n## Setup Examples"

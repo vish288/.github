@@ -52,3 +52,20 @@ jobs:
           python3 .ci/scripts/derive_artifacts.py
           git diff --exit-code llms.txt gemini-extension.json \
             || { echo "::error::llms.txt / gemini-extension.json are stale; the release pipeline derives them from server.json and llms-full.txt"; exit 1; }
+      # Advisory only: warn when the Copier template pin (.copier-answers _commit) is behind the
+      # latest vish288/.github semver tag. Copier owns the stub pins; this never fails the build.
+      - name: Template drift (advisory)
+        if: ${{ always() }}
+        run: |
+          ans=.copier-answers.yml
+          if [ ! -f "$ans" ]; then
+            echo "no $ans; this repo has not adopted the Copier template — skipping drift check"
+            exit 0
+          fi
+          cur=$(sed -n -E 's/^_commit: *["'"'"']?([^"'"'"']*)["'"'"']? *$/\1/p' "$ans" | head -1)
+          latest=$(git ls-remote --tags --refs https://github.com/vish288/.github 'v*' \
+            | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "template pin: _commit=${cur:-?}, latest vish288/.github tag=${latest:-?}"
+          if [ -n "$latest" ] && [ -n "$cur" ] && [ "$cur" != "$latest" ]; then
+            echo "::warning::template drift: on $cur, latest is $latest — run scripts/fleet-update.sh $latest"
+          fi

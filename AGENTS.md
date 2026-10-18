@@ -105,6 +105,81 @@ tag's commit SHA with a `# vX.Y.Z` comment
 Dependabot's `github-actions` updater bumps the SHA to the next release. Breaking an input or the
 stub contract bumps the major (`v2.0.0`).
 
+## Copier template
+
+The `template/` directory is a [Copier](https://copier.readthedocs.io) template that renders the
+~20 non-runtime files every server must carry: the six workflow stubs, `Dockerfile`,
+`.github/dependabot.yml`, `LICENSE`, `.gitignore`, `.dockerignore`, `ruff.toml` and the
+`.copier-answers.yml` tracker. `copier.yml` at the repo root declares `_subdirectory: template`,
+so only `template/` is rendered — `copier.yml`, `scripts/` and `tests/` stay out of the output.
+
+### Answers (four questions)
+
+| answer | type | used in | argocd / gitlab / atlassian / coda |
+| --- | --- | --- | --- |
+| `service` | str (`^mcp-[a-z-]+$`) | Dockerfile, release-stub comment | mcp-argocd / mcp-gitlab / mcp-atlassian-extended / mcp-coda |
+| `coverage_min` | int | tests + release stubs | 98 / 98 / 95 / 99 |
+| `pyright` | bool | lint + release stubs | false / false / false / true |
+| `llms_split_marker` | str | lint + release stubs (derive drift) | `\n## Configuration` / `…` / `\n## Environment Variables` / `\n## Setup Examples` |
+
+`package` is derived in Jinja, not asked. The stubs forward `coverage_min` always, `pyright` only
+when true, and `llms_split_marker` only when it differs from the default — so argocd (all
+defaults) renders byte-identical to its hand-written stubs.
+
+### Bracket delimiters (why `${{ }}` survives)
+
+The stubs must emit GitHub Actions `${{ … }}` verbatim, which collides with Jinja's default
+`{{ }}`. `copier.yml` `_envops` switches Jinja to the bracket set — `[[ ]]`, `[% %]`, `[# #]` —
+so `${{ … }}` passes through untouched. The answers-file **name**
+(`template/[[ _copier_conf.answers_file ]].jinja`) uses the same brackets; with `{{ }}` Copier
+writes a literal-named file and a later `update` fails to find the template.
+
+### Stub SHA pins — how a tag pins its own commit
+
+A template cannot contain its own commit SHA (the content and the commit are written together).
+Copier resolves this: each stub renders
+`uses: vish288/.github/.github/workflows/<name>.yml@[[ _copier_conf.vcs_ref_hash ]] # [[ _copier_answers._commit ]]`.
+`_copier_conf.vcs_ref_hash` is the commit of the ref Copier rendered from, and `_copier_answers._commit`
+is that ref's describe. So `copier copy -r vX.Y.Z` checks out the tag `vX.Y.Z`, and the pin
+becomes that tag's own commit SHA with a `# vX.Y.Z` comment — the stub for version X.Y.Z pins
+X.Y.Z's commit, atomically. (`_copier_conf.vcs_ref` is **not** stable across copy/update; only
+`vcs_ref_hash` and `_copier_answers._commit` are.)
+
+### ruff config → `ruff.toml`
+
+`template/ruff.toml` carries the ruff config (Ruff reads `ruff.toml` in preference to
+`pyproject.toml`, and ignores a pyproject with no `[tool.ruff]`). On adoption,
+`scripts/migrations/drop_tool_ruff.py` (tomlkit, idempotent) removes the now-redundant
+`[tool.ruff*]` tables from the server's `pyproject.toml`. This runs at adoption, **not** as a
+Copier `_migrations` entry: adoption is `copier copy`, and `_migrations` only run on
+`copier update`.
+
+### Tests
+
+`tests/answers/*.yml` hold the four answer sets; `tests/golden/<svc>/` hold the expected
+rendered trees. `ci.yml`'s `template` job renders each set (`tests/render.sh`), diffs against the
+golden tree, and runs actionlint over the rendered stubs. `tests/render.sh` normalises the
+version-dependent pin (`@<sha> # <ref>` → `@PIN`) and the machine-specific answers lines
+(`_commit`, `_src_path`), so golden stays commit-stable and free of local paths. After any
+template change, run `tests/regen-golden.sh` and commit the result — the golden diff IS the
+rendered effect of the change, ×4. `template/` is outside `.github/workflows` and uses `.jinja`
+suffixes, so it is out of this repo's root actionlint and Dependabot scope; it is linted only
+through its rendered output here.
+
+### Fan-out (`scripts/fleet-update.sh`)
+
+A template release reaches the servers through `scripts/fleet-update.sh vX.Y.Z [--codemod <path>]`,
+run by the owner locally. It loops argocd → coda → atlassian-extended → gitlab:
+`copier update --trust --defaults --conflict rej -r vX.Y.Z` (the `-r` pins the tag), optional
+codemod over `src/ tests/`, `ruff format` + `ruff check --fix`, then the server's own gates
+(`pytest -q`, `ruff check`, `pyright` when the repo ships it), a signed commit via
+`iterm-run` (the sandbox shell has no 1Password login; it polls `git log` up to 120 s), a branch
+push and a PR. It stops on the first `*.rej` or red gate and never leaves an unsigned commit on a
+pushed branch. `--dry-run` previews; repo paths come from `--repos-dir` or `$MCP_FLEET_ROOT` (no
+machine path is baked in). Dependabot `ignore`s `vish288/.github` refs in the templated
+`dependabot.yml` so it does not fight Copier over the stub pins; the reusable `lint.yml` carries
+an advisory drift warning comparing `.copier-answers` `_commit` against the latest semver tag.
+
 ## Conventions
 
 - Third-party actions are pinned by commit SHA with a trailing `# vX.Y.Z` comment.

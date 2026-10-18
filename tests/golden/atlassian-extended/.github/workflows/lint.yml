@@ -1,0 +1,8 @@
+name: Lint
+# Stub -> vish288/.github.
+on: [push, pull_request]
+jobs:
+  lint:
+    uses: vish288/.github/.github/workflows/lint.yml@PIN
+    with:
+      llms_split_marker: "\n## Environment Variables"

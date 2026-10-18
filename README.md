@@ -46,6 +46,30 @@ Pin the commit SHA with a `# vX.Y.Z` comment so the ref is immutable and Dependa
 See `AGENTS.md` for the full stub contract, including the `publish.yml` / PyPI
 trusted-publishing requirement.
 
+## Copier template
+
+`template/` is a [Copier](https://copier.readthedocs.io) template that renders the non-runtime
+files every server carries — the six workflow stubs, `Dockerfile`, `dependabot.yml`, `LICENSE`,
+`.gitignore`, `.dockerignore` and `ruff.toml` — from four answers (`service`, `coverage_min`,
+`pyright`, `llms_split_marker`). One template release updates all four servers' stubs and their
+SHA pins in one command.
+
+Adopt or update a server (run with Copier 9.19+ via `uvx`, no global install):
+
+```bash
+# first adoption
+uvx copier copy --trust -r vX.Y.Z gh://vish288/.github .
+# later updates (fan-out script does this for all four)
+uvx copier update --trust --defaults --conflict rej -r vX.Y.Z
+```
+
+The stub SHA pins render from the template tag's own commit (`_copier_conf.vcs_ref_hash`), so a
+stub generated from `vX.Y.Z` pins `vX.Y.Z`'s commit. The owner fans a release out with
+`scripts/fleet-update.sh vX.Y.Z [--codemod <path>]` (one signed branch + PR per repo; `--dry-run`
+to preview; repo paths from `--repos-dir` or `$MCP_FLEET_ROOT`). `ci.yml` renders the four
+committed answer sets, golden-diffs them and actionlints the output. See `AGENTS.md` for the
+answers table, the bracket-delimiter requirement, the `ruff.toml` move and the drift check.
+
 ## Versioning
 
 Tags are semver only (`vX.Y.Z`) and never move. Servers pin the tag's commit SHA with a

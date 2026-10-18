@@ -1,0 +1,9 @@
+name: Link check
+# Stub -> vish288/.github.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  workflow_dispatch:
+jobs:
+  links:
+    uses: vish288/.github/.github/workflows/link-check.yml@[[ _copier_conf.vcs_ref_hash ]] # [[ _copier_answers._commit ]]
