@@ -70,6 +70,17 @@ def main() -> int:
         llms = (root / "llms.txt").read_text(encoding="utf-8")
         assert llms == "# Thing\n\nIntro line.\n", repr(llms)
 
+        # An empty LLMS_SPLIT_MARKER falls back to the default instead of crashing.
+        (root / "llms.txt").unlink()
+        subprocess.run(  # noqa: S603 - fixed argv, trusted script path
+            [sys.executable, "-I", str(SCRIPT)],
+            cwd=root,
+            check=True,
+            env={"LLMS_SPLIT_MARKER": "", "PATH": ""},
+        )
+        llms = (root / "llms.txt").read_text(encoding="utf-8")
+        assert llms == "# Thing\n\nIntro line.\n", repr(llms)
+
     print("ok   derive_artifacts")
     return 0
 
