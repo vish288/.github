@@ -1,0 +1,27 @@
+name: Lint
+
+# Reusable Python lint for the mcp-* servers (ruff + optional pyright), run against the
+# caller's tree. actionlint, shellcheck and the scripts/ci self-tests are NOT run here:
+# the servers keep only thin workflow stubs and no scripts/ci, so those belong to this
+# repo's own ci.yml, which lints the real reusable workflows and shared scripts.
+on:
+  workflow_call:
+    inputs:
+      pyright:
+        description: "Run `uv run pyright` after ruff (only servers that ship pyright)."
+        type: boolean
+        default: false
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - if: ${{ inputs.pyright }}
+        run: uv run pyright

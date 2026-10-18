@@ -1,0 +1,31 @@
+name: CI
+
+# This repo ships no application code — only reusable workflows and the shared scripts/ci.
+# So its own CI lints the workflow YAML (actionlint + shellcheck) and runs the scripts'
+# self-tests. The servers' reusable lint.yml deliberately does NOT do this: they carry only
+# thin stubs and no scripts/ci, so there is nothing there to lint.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # 1.7.12
+        env:
+          SHELLCHECK_OPTS: -S warning
+        with:
+          args: -color
+      - run: shellcheck -S warning scripts/ci/*.sh
+      - run: scripts/ci/retry.sh --self-test
+      - run: scripts/ci/state.sh --self-test
+      - name: derive_artifacts.py parses
+        run: python3 -c "import ast; ast.parse(open('scripts/derive_artifacts.py').read())"

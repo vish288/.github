@@ -1,0 +1,22 @@
+name: Link check
+
+# Reusable documentation link check for the mcp-* servers. Called on a weekly schedule
+# from each server's stub (and by hand). Links assert on third-party availability, so a
+# transient pypi.org / shields.io failure says nothing about any commit -- it is run off
+# the push path on purpose, and a failure is information, not a merge blocker.
+on:
+  workflow_call:
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras
+      # -m network selects exactly what the default test run excludes.
+      - run: uv run pytest -m network tests/test_links.py

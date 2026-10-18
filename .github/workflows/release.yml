@@ -1,0 +1,355 @@
+name: Semantic Release
+
+# Reusable release pipeline for the mcp-* servers. Each server's release.yml stub owns the
+# workflow_dispatch UI and forwards its inputs here. This runs in the caller's context, so
+# the checkout, git history, version files and GITHUB_REPOSITORY are the server's. The
+# shared derive_artifacts.py / retry.sh live in this repo and are checked out into .ci/ at
+# this workflow's own ref (github.job_workflow_sha); derive_artifacts.py operates on the
+# current working directory (the caller checkout).
+#
+# workflow_call inputs cannot be `choice`, so bump / publish_fail_at are strings; the caller
+# stub keeps the dropdowns and forwards the chosen value.
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: "Version bump type (ignored if version is set): patch | minor | major"
+        type: string
+        default: patch
+      version:
+        description: "Explicit version (e.g. 0.7.0) — overrides bump"
+        type: string
+        default: ""
+      dry_run:
+        description: "Dry run (no tag/push)"
+        type: boolean
+        default: false
+      publish_fail_at:
+        description: "Test hook forwarded to publish.yml: fail that job on attempt 1 before it writes"
+        type: string
+        default: none
+      coverage_min:
+        description: "Coverage floor for the test gate"
+        type: number
+        default: 95
+      pyright:
+        description: "Run pyright in the lint gate"
+        type: boolean
+        default: false
+      llms_split_marker:
+        description: "Heading that ends llms.txt within llms-full.txt (passed to derive_artifacts.py)"
+        type: string
+        default: "\n## Configuration"
+    secrets:
+      RELEASE_PAT:
+        description: "PAT with the ruleset Admin bypass; moves main and the tag, dispatches publish.yml"
+        required: true
+
+jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+    with:
+      coverage_min: ${{ inputs.coverage_min }}
+  lint:
+    uses: ./.github/workflows/lint.yml
+    with:
+      pyright: ${{ inputs.pyright }}
+
+  release:
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write   # dispatch publish.yml, keep reconcile.yml enabled
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch shared CI scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: vish288/.github
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci
+          persist-credentials: false
+
+      - name: Validate explicit version
+        if: ${{ inputs.version != '' }}
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::version must be X.Y.Z, got '$INPUT_VERSION'"; exit 1;
+          }
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Get current version
+        id: current
+        run: |
+          version=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Current version: $version"
+
+      - name: Compute next version
+        id: next
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUMP: ${{ inputs.bump }}
+          CURRENT_VERSION: ${{ steps.current.outputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            echo "Explicit version: $version"
+          else
+            IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
+            case "$INPUT_BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+              *) echo "::error::bump must be patch|minor|major, got '$INPUT_BUMP'"; exit 1 ;;
+            esac
+            version="$major.$minor.$patch"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Next version: $version"
+
+      - name: Update pyproject.toml version
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ steps.next.outputs.version }}\"/" pyproject.toml
+          grep '^version' pyproject.toml
+
+      - name: Update llms-full.txt version
+        run: |
+          for f in llms-full.txt; do
+            [ -f "$f" ] && sed -i 's/^- \*\*Version\*\*: .*/- **Version**: ${{ steps.next.outputs.version }}/' "$f"
+          done
+
+      - name: Update server.json version
+        env:
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          python - <<'PY'
+          import json, os
+          v = os.environ["NEXT_VERSION"]
+          with open("server.json") as f:
+              data = json.load(f)
+          data["version"] = v
+          for pkg in data.get("packages", []):
+              pkg["version"] = v
+          with open("server.json", "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          PY
+
+      - name: Derive gemini-extension.json and llms.txt
+        env:
+          LLMS_SPLIT_MARKER: ${{ inputs.llms_split_marker }}
+        run: python .ci/scripts/derive_artifacts.py
+
+      - name: Regenerate uv.lock
+        run: uv lock
+
+      - name: Generate CHANGELOG.md
+        id: changelog
+        env:
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          # Find previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          DATE=$(date -u +%Y-%m-%d)
+          ENTRY="## [${NEXT_VERSION}] - ${DATE}"$'\n'
+
+          # Classify on the SUBJECT only. `git log --grep` matches the whole commit
+          # message, so a wrapped body line beginning "test ..." filed the same commit
+          # under both "Bug Fixes" and "Tests".
+          ALL_COMMITS=$(git log "$RANGE" --pretty=format:"%s|%h" 2>/dev/null || true)
+          for type_label in "feat:Features" "fix:Bug Fixes" "refactor:Refactoring" "docs:Documentation" "perf:Performance" "test:Tests" "chore:Chores"; do
+            type="${type_label%%:*}"
+            label="${type_label#*:}"
+            commits=$(printf '%s\n' "$ALL_COMMITS" \
+              | { grep -E "^${type}(\(.*\))?!?:" || true; } \
+              | while IFS='|' read -r msg hash; do printf -- "- %s (%s)\n" "$msg" "$hash"; done)
+            if [ -n "$commits" ]; then
+              ENTRY+=$'\n'"### ${label}"$'\n'
+              ENTRY+="${commits}"$'\n'
+            fi
+          done
+
+          # Commits that match no conventional type
+          other=$(printf '%s\n' "$ALL_COMMITS" \
+            | { grep -v -E "^(feat|fix|refactor|docs|perf|test|chore)(\(.*\))?!?:" || true; } \
+            | while IFS='|' read -r msg hash; do
+                if [ -n "$msg" ]; then printf -- "- %s (%s)\n" "$msg" "$hash"; fi
+              done)
+          if [ -n "$other" ]; then
+            ENTRY+=$'\n'"### Other"$'\n'
+            ENTRY+="${other}"$'\n'
+          fi
+
+          if [ -f CHANGELOG.md ]; then
+            {
+              head -1 CHANGELOG.md
+              echo ""
+              echo "$ENTRY"
+              tail -n +2 CHANGELOG.md
+            } > CHANGELOG.tmp
+            mv CHANGELOG.tmp CHANGELOG.md
+          else
+            {
+              echo "# Changelog"
+              echo ""
+              echo "$ENTRY"
+            } > CHANGELOG.md
+          fi
+
+          echo "$ENTRY" > /tmp/changelog-entry.txt
+          echo "Generated CHANGELOG.md entry for v${NEXT_VERSION}"
+
+      - name: Verify build
+        run: uv build
+
+      - name: Create verified release commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          # Parent the release commit on the tested commit ($GITHUB_SHA), not on whatever
+          # main points at now; the next step fast-forwards only if main has not moved.
+          # Omit author/committer so GitHub signs it as github-actions[bot] (Verified).
+          BASE_TREE=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq '.tree.sha')
+
+          # Create blobs via temp files to avoid ARG_MAX limits on large files.
+          create_blob() {
+            local file="$1"
+            base64 -w 0 "$file" > /tmp/b64content.txt
+            jq -Rs '{"encoding":"base64","content":rtrimstr("\n")}' /tmp/b64content.txt > /tmp/blob.json
+            gh api "repos/$GITHUB_REPOSITORY/git/blobs" \
+              -X POST --input /tmp/blob.json --jq '.sha'
+          }
+
+          PYPROJECT_BLOB=$(create_blob pyproject.toml)
+          UVLOCK_BLOB=$(create_blob uv.lock)
+          CHANGELOG_BLOB=$(create_blob CHANGELOG.md)
+          LLMS_BLOB=$(create_blob llms.txt)
+          LLMS_FULL_BLOB=$(create_blob llms-full.txt)
+          SERVER_JSON_BLOB=$(create_blob server.json)
+          GEMINI_EXT_BLOB=$(create_blob gemini-extension.json)
+
+          NEW_TREE=$(gh api "repos/$GITHUB_REPOSITORY/git/trees" \
+            -X POST \
+            --input - <<EOF | jq -r '.sha'
+          {
+            "base_tree": "$BASE_TREE",
+            "tree": [
+              { "path": "pyproject.toml",         "mode": "100644", "type": "blob", "sha": "$PYPROJECT_BLOB" },
+              { "path": "uv.lock",                "mode": "100644", "type": "blob", "sha": "$UVLOCK_BLOB" },
+              { "path": "CHANGELOG.md",           "mode": "100644", "type": "blob", "sha": "$CHANGELOG_BLOB" },
+              { "path": "llms.txt",               "mode": "100644", "type": "blob", "sha": "$LLMS_BLOB" },
+              { "path": "llms-full.txt",          "mode": "100644", "type": "blob", "sha": "$LLMS_FULL_BLOB" },
+              { "path": "server.json",            "mode": "100644", "type": "blob", "sha": "$SERVER_JSON_BLOB" },
+              { "path": "gemini-extension.json",  "mode": "100644", "type": "blob", "sha": "$GEMINI_EXT_BLOB" }
+            ]
+          }
+          EOF
+          )
+
+          # Create the commit — no author/committer block, so GitHub signs it.
+          COMMIT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/commits" \
+            -X POST \
+            --input - <<EOF | jq -r '.sha'
+          {
+            "message": "chore(release): $NEXT_VERSION",
+            "tree": "$NEW_TREE",
+            "parents": ["$GITHUB_SHA"]
+          }
+          EOF
+          )
+
+          VERIFIED=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$COMMIT_SHA" --jq '.verification.verified')
+          REASON=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$COMMIT_SHA" --jq '.verification.reason')
+          [ "$VERIFIED" = "true" ] || { echo "::error::release commit $COMMIT_SHA is not verified ($REASON)"; exit 1; }
+          echo "sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "Created verified commit $COMMIT_SHA ($REASON)"
+
+      - name: Move main and create tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          # RELEASE_PAT only: it is the Admin bypass on the ruleset (publish.yml has no
+          # tag-push trigger; the next step dispatches it). force=false fast-forwards main,
+          # so a commit landing on main mid-run aborts the release rather than being reverted.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+          COMMIT_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          MAIN_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [ "$MAIN_SHA" = "$GITHUB_SHA" ] || { echo "::error::main moved from $GITHUB_SHA to $MAIN_SHA during the run; re-run the release"; exit 1; }
+
+          gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/main" \
+            -X PATCH \
+            -f sha="$COMMIT_SHA" \
+            -F force=false
+
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -X POST \
+            -f ref="refs/tags/v$NEXT_VERSION" \
+            -f sha="$COMMIT_SHA"
+
+          echo "Moved main and created tag v$NEXT_VERSION at $COMMIT_SHA"
+
+      - name: Dispatch publish and keep reconcile enabled
+        if: ${{ !inputs.dry_run }}
+        env:
+          # RELEASE_PAT, not GITHUB_TOKEN: a Publish run started via GITHUB_TOKEN does not fire
+          # reconcile.yml's workflow_run trigger, so a failed publish would wait for the 6h cron
+          # instead of the ~5 min failure path. The PAT needs Actions: write to dispatch.
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+          FAIL_AT: ${{ inputs.publish_fail_at || 'none' }}
+        run: |
+          # publish.yml is dispatch-only (no tag-push trigger), so this is the single run that does
+          # the work and honours fail_at; reconcile.yml retries a failed run ~5 min later, then on a cron.
+          gh workflow enable reconcile.yml || echo "::warning::could not enable reconcile.yml"
+          .ci/scripts/ci/retry.sh gh workflow run publish.yml --ref "refs/tags/v$NEXT_VERSION" -f fail_at="$FAIL_AT" \
+            || { echo "::error::could not dispatch publish; run: gh workflow run publish.yml --ref refs/tags/v$NEXT_VERSION (reconcile.yml cron also retries)"; exit 1; }
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "## Dry Run Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Current: ${{ steps.current.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Next: ${{ steps.next.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Bump: ${{ inputs.bump }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release commit ${{ steps.commit.outputs.sha }} verified: true (dangling, not pushed)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- No changes pushed." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Changelog Preview" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/changelog-entry.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release summary
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "## Release v${{ steps.next.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag pushed and publish dispatched: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/publish.yml" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Changelog Entry" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/changelog-entry.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

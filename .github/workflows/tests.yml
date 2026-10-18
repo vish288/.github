@@ -1,0 +1,38 @@
+name: Tests
+
+# Reusable test matrix for the mcp-* servers. Each server's tests.yml stub calls this on
+# push and pull_request; release.yml calls it as a gate. The caller's repo is checked out
+# (the github context is the caller's), so pytest runs against the server's own tree.
+on:
+  workflow_call:
+    inputs:
+      coverage_min:
+        description: "Minimum total coverage percent; the run fails below it."
+        type: number
+        default: 95
+      upload_coverage:
+        description: "Upload coverage.xml to Codecov (advisory, never blocks)."
+        type: boolean
+        default: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - run: uv run pytest --cov --cov-report=xml --cov-fail-under=${{ inputs.coverage_min }}
+      - name: Upload coverage
+        if: ${{ inputs.upload_coverage && matrix.python-version == '3.13' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        continue-on-error: true
+        with:
+          file: coverage.xml
