@@ -28,7 +28,7 @@ jobs:
           #   job.workflow_sha / job.workflow_repository -> check this repo out into .ci/ at the
           #     reusable workflow's own commit (docs: Contexts reference, job context).
           #   $/.github/workflows/...  -> same-repo reusable-workflow ref (docs: Reuse workflows).
-          args: -color -ignore workflow_sha -ignore workflow_repository
+          args: -color -ignore workflow_sha -ignore workflow_repository -ignore \$/\.github/workflows/
       - run: shellcheck -S warning scripts/ci/*.sh
       - run: scripts/ci/retry.sh --self-test
       - run: scripts/ci/state.sh --self-test
