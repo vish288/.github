@@ -31,7 +31,7 @@ die() { echo "fleet-update: $*" >&2; exit 1; }
 # --- signals / errors ---------------------------------------------------------------------
 _current_repo=""
 resume_hint() {
-  echo "  next: re-run  scripts/fleet-update.sh ${VERSION:-vX.Y.Z}${CODEMOD:+ --codemod $CODEMOD}" >&2
+  echo "  next: re-run  scripts/fleet-update.sh ${VERSION:-vX.Y.Z}${CODEMOD:+ --codemod $CODEMOD}${REPOS_DIR_FLAG:+ --repos-dir $REPOS_DIR}" >&2
   echo "        (it skips repos already on ${VERSION:-the version} and resumes a pushed branch)" >&2
 }
 on_signal() {  # $1 = exit code
@@ -58,13 +58,13 @@ trap on_err ERR
 _exec() { "$@" & CHILD_PID=$!; wait "$CHILD_PID"; local rc=$?; CHILD_PID=""; return "$rc"; }
 
 # --- argument parsing (pure; exercised by --self-test) ------------------------------------
-VERSION=""; CODEMOD=""; DRY_RUN=0; REPOS_DIR=""
+VERSION=""; CODEMOD=""; DRY_RUN=0; REPOS_DIR=""; REPOS_DIR_FLAG=""
 parse_args() {
-  VERSION=""; CODEMOD=""; DRY_RUN=0; REPOS_DIR="${MCP_FLEET_ROOT:-}"
+  VERSION=""; CODEMOD=""; DRY_RUN=0; REPOS_DIR="${MCP_FLEET_ROOT:-}"; REPOS_DIR_FLAG=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --codemod)   CODEMOD="${2:-}"; [ -n "$CODEMOD" ] || return 2; shift 2 ;;
-      --repos-dir) REPOS_DIR="${2:-}"; [ -n "$REPOS_DIR" ] || return 2; shift 2 ;;
+      --repos-dir) REPOS_DIR="${2:-}"; [ -n "$REPOS_DIR" ] || return 2; REPOS_DIR_FLAG=1; shift 2 ;;
       --dry-run)   DRY_RUN=1; shift ;;
       -*)          echo "unknown flag: $1" >&2; return 2 ;;
       *)           [ -z "$VERSION" ] || return 2; VERSION="$1"; shift ;;
@@ -93,28 +93,56 @@ local_branch_exists()    { git -C "$1" show-ref --verify --quiet "refs/heads/$2"
 head_moved()             { [ "$(git -C "$1" rev-parse HEAD)" != "$2" ]; }
 head_is_signed()         { git -C "$1" cat-file -p HEAD 2>/dev/null | grep -q '^gpgsig'; }
 
+# A branch is a pushable fleet branch only if: the tree is clean, HEAD is ahead of origin/main,
+# and EVERY commit in origin/main..HEAD is signed. A local branch sitting at origin/main (0
+# commits ahead) or a dirty/unsigned one is refused — otherwise the resume path would push a
+# branch identical to main, fail `gh pr create`, and then the remote-branch skip would block the
+# repo for good.
+range_all_signed() {  # $1 = repo path
+  local repo=$1 c
+  [ -z "$(git -C "$repo" status --porcelain)" ] || return 1
+  [ "$(git -C "$repo" rev-list --count origin/main..HEAD)" -gt 0 ] || return 1
+  for c in $(git -C "$repo" rev-list origin/main..HEAD); do
+    git -C "$repo" cat-file -p "$c" 2>/dev/null | grep -q '^gpgsig' || return 1
+  done
+  return 0
+}
+
 ensure_label() {  # idempotent — the `fleet` label exists in none of the repos yet
   in_repo "$1" env -u GH_TOKEN gh label create fleet --color ededed \
     --description "template fan-out" 2>/dev/null || true
 }
 open_pr() { in_repo "$1" env -u GH_TOKEN gh pr create --fill --label fleet; }
 
+# Did the last commit attempt produce a moved, signed HEAD? 0 = yes; 1 = moved-but-unsigned
+# (fail closed); 2 = not moved yet.
+_commit_verdict() {  # $1 = repo, $2 = before-sha
+  head_moved "$1" "$2" || return 2
+  if head_is_signed "$1"; then echo "  signed commit landed: $(git -C "$1" log --oneline -1)"; return 0; fi
+  echo "::stop:: commit $(git -C "$1" rev-parse --short HEAD) is UNSIGNED — not pushing" >&2
+  return 1
+}
+
 signed_commit() {  # $1 = repo path, $2 = message-file ; fail closed on unsigned/no-move
-  local repo=$1 msgfile=$2 runner="${FLEET_COMMIT_RUNNER:-}" before attempt waited
+  local repo=$1 msgfile=$2 runner="${FLEET_COMMIT_RUNNER:-}" before attempt waited v
   if [ "$DRY_RUN" = 1 ]; then echo "DRY  commit -S via \${FLEET_COMMIT_RUNNER:-git} in $repo"; return 0; fi
   before=$(git -C "$repo" rev-parse HEAD)
+  # No runner: `git commit -S` is synchronous — commit once and check, no poll.
+  if [ -z "$runner" ]; then
+    git -C "$repo" commit -S -F "$msgfile" || true
+    _commit_verdict "$repo" "$before"; v=$?
+    [ "$v" = 0 ] && return 0
+    [ "$v" = 2 ] && echo "::stop:: git commit -S produced no commit in $(basename "$repo")" >&2
+    return 1
+  fi
+  # Runner (e.g. an iTerm/1Password bridge): the signed commit may land asynchronously; poll.
   for attempt in 1 2; do
-    if [ -n "$runner" ]; then "$runner" "git -C '$repo' commit -S -F '$msgfile'" || true
-    else git -C "$repo" commit -S -F "$msgfile" || true; fi
+    "$runner" "git -C '$repo' commit -S -F '$msgfile'" || true
     waited=0
     while [ "$waited" -lt "$SIGN_TIMEOUT" ]; do
-      if head_moved "$repo" "$before"; then
-        if head_is_signed "$repo"; then
-          echo "  signed commit landed: $(git -C "$repo" log --oneline -1)"; return 0
-        fi
-        echo "::stop:: commit $(git -C "$repo" rev-parse --short HEAD) is UNSIGNED — not pushing" >&2
-        return 1  # fail closed: do not retry into a second unsigned commit
-      fi
+      _commit_verdict "$repo" "$before"; v=$?
+      [ "$v" = 0 ] && return 0
+      [ "$v" = 1 ] && return 1  # moved but unsigned — do not retry into a second unsigned commit
       sleep 3; waited=$((waited + 3))
     done
     echo "  signing attempt $attempt produced no commit within ${SIGN_TIMEOUT}s" >&2
@@ -142,12 +170,14 @@ update_one() {  # $1 = repo path
     echo "skip $name: remote branch $branch already exists (PR: ${pr:-none}); land or close it, then re-run"
     _current_repo=""; return 0
   fi
-  # Resume: a local-only branch exists — verify it is signed, push it, open the PR.
+  # Resume: a local-only branch exists — it must be a clean, ahead-of-main, fully-signed fleet
+  # branch before we push it, or we would push a copy of main and poison the repo.
   if local_branch_exists "$repo" "$branch"; then
     echo "resume $name: local $branch exists but is not pushed"
     run git -C "$repo" switch "$branch"
-    if [ "$DRY_RUN" != 1 ]; then
-      head_is_signed "$repo" || { echo "::stop:: $name $branch HEAD is unsigned — re-sign before pushing" >&2; exit 1; }
+    if [ "$DRY_RUN" != 1 ] && ! range_all_signed "$repo"; then
+      echo "::stop:: $name $branch has no fleet commit / is dirty: fix it, or delete it with \`git branch -D $branch\`, then re-run" >&2
+      resume_hint; exit 1
     fi
     run git -C "$repo" push -u origin "$branch"
     ensure_label "$repo"; open_pr "$repo"; _current_repo=""; return 0
@@ -165,7 +195,7 @@ update_one() {  # $1 = repo path
   if [ "$DRY_RUN" != 1 ] && find "$repo" -name '*.rej' -print -quit | grep -q .; then
     echo "::stop:: conflicts (*.rej) in $name — resolve, commit, then re-run for the rest" >&2
     find "$repo" -name '*.rej' >&2
-    exit 1
+    resume_hint; exit 1
   fi
 
   [ -n "$CODEMOD" ] && in_repo "$repo" uv run --with libcst python "$CODEMOD" src tests
@@ -181,14 +211,21 @@ update_one() {  # $1 = repo path
   fi
 
   msg="$repo/.internal/fleet-msg.txt"
-  mkdir -p "$repo/.internal"
-  printf 'chore(fleet): template %s\n\nUpdate to the vish288/.github template %s (stubs, Dockerfile, ruff.toml, dependabot).\n' "$VERSION" "$VERSION" > "$msg"
+  if [ "$DRY_RUN" != 1 ]; then
+    mkdir -p "$repo/.internal"
+    printf 'chore(fleet): template %s\n\nUpdate to the vish288/.github template %s (stubs, Dockerfile, ruff.toml, dependabot).\n' "$VERSION" "$VERSION" > "$msg"
+  fi
   run git -C "$repo" add -A
 
   signed_commit "$repo" "$msg" || {
     echo "::stop:: signing failed in $name — nothing pushed; re-sign locally, then re-run" >&2
-    exit 1
+    resume_hint; exit 1
   }
+  # Same full-range guarantee as the resume path: never push unless the whole range is signed.
+  if [ "$DRY_RUN" != 1 ] && ! range_all_signed "$repo"; then
+    echo "::stop:: $name origin/main..HEAD is not all signed/clean — not pushing" >&2
+    resume_hint; exit 1
+  fi
 
   run git -C "$repo" push -u origin "$branch"
   ensure_label "$repo"; open_pr "$repo"
@@ -258,6 +295,18 @@ self_test() {
   git -C "$tmp/repo" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m more
   head_moved "$tmp/repo" "$before" && echo "  ok   head_moved detects a new commit" || { echo "  FAIL head_moved"; fail=1; }
   ! head_is_signed "$tmp/repo" && echo "  ok   head_is_signed rejects an unsigned commit" || { echo "  FAIL head_is_signed false-positive"; fail=1; }
+
+  # range_all_signed: a branch sitting at origin/main (0 commits ahead) must be refused, so the
+  # resume path never pushes a copy of main.
+  git -C "$tmp/repo" switch -q -c at-main origin/main
+  ! range_all_signed "$tmp/repo" && echo "  ok   range refuses a branch at origin/main (0 ahead)" || { echo "  FAIL range accepted 0-ahead"; fail=1; }
+  # An unsigned commit ahead of main must be refused.
+  git -C "$tmp/repo" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m ahead
+  ! range_all_signed "$tmp/repo" && echo "  ok   range refuses an unsigned commit ahead of main" || { echo "  FAIL range accepted unsigned-ahead"; fail=1; }
+  # A dirty tree must be refused.
+  : > "$tmp/repo/dirty.txt"
+  ! range_all_signed "$tmp/repo" && echo "  ok   range refuses a dirty tree" || { echo "  FAIL range accepted dirty tree"; fail=1; }
+  rm -f "$tmp/repo/dirty.txt"
 
   [ "$fail" = 0 ] && echo "fleet-update self-test: OK" || { echo "fleet-update self-test: FAILED"; return 1; }
 }
