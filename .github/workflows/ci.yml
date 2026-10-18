@@ -23,7 +23,10 @@ jobs:
         env:
           SHELLCHECK_OPTS: -S warning
         with:
-          args: -color
+          # -ignore job_workflow_sha: actionlint 1.7.12 does not yet know the
+          # github.job_workflow_sha context property (used to check this repo out
+          # into .ci/ at the reusable workflow's own ref). It is valid at runtime.
+          args: -color -ignore job_workflow_sha
       - run: shellcheck -S warning scripts/ci/*.sh
       - run: scripts/ci/retry.sh --self-test
       - run: scripts/ci/state.sh --self-test
