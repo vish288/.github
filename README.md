@@ -42,9 +42,10 @@ jobs:
       coverage_min: 98
 ```
 
-Pin the commit SHA with a `# vX.Y.Z` comment so the ref is immutable and Dependabot bumps it.
-See `AGENTS.md` for the full stub contract, including the `publish.yml` / PyPI
-trusted-publishing requirement.
+Pin the commit SHA with a `# vX.Y.Z` comment so the ref is immutable. Copier renders these pins
+from the template tag and `scripts/fleet-update.sh` moves them on each release; Dependabot ignores
+`vish288/.github` refs. See `AGENTS.md` for the full stub contract, including the `publish.yml` /
+PyPI trusted-publishing requirement.
 
 ## Copier template
 
@@ -73,8 +74,9 @@ answers table, the bracket-delimiter requirement, the `ruff.toml` move and the d
 ## Versioning
 
 Tags are semver only (`vX.Y.Z`) and never move. Servers pin the tag's commit SHA with a
-`# vX.Y.Z` comment, and Dependabot bumps the SHA to the next release. A breaking change to an
-input or contract bumps the major (`v2.0.0`).
+`# vX.Y.Z` comment; Copier and `scripts/fleet-update.sh` own those pins and move them on each
+release, and Dependabot ignores `vish288/.github` refs. A breaking change to an input or contract
+bumps the major (`v2.0.0`).
 
 ## License
 

@@ -4,37 +4,58 @@
 #   scripts/fleet-update.sh vX.Y.Z [--codemod <path>] [--dry-run] [--repos-dir <dir>]
 #
 # For each repo, in order argocd -> coda -> atlassian-extended -> gitlab:
-#   git switch -c chore/fleet-vX.Y.Z <main>
+#   skip if origin/main is already on vX.Y.Z, or if a remote fan-out branch already exists
+#     (then report its PR); resume a local-only branch by verifying + pushing it
+#   git switch -c chore/fleet-vX.Y.Z origin/main
 #   copier update --trust --defaults --conflict rej -r vX.Y.Z   (-r pins the tag)
 #   stop if any *.rej appeared (a template-owned file was edited locally; owner resolves)
 #   optional: run the codemod over src/ tests/
 #   uv run ruff format . && uv run ruff check --fix .
 #   uv run pytest -q && uv run ruff check .  [&& uv run pyright]   (the server's own gates)
-#   signed commit via ~/.local/bin/iterm-run (the sandbox shell has no 1Password login), poll
-#     git log up to 120 s
-#   push the branch, open a PR with `gh`
+#   signed commit through $FLEET_COMMIT_RUNNER (a command that runs a shell string in a login
+#     session that can reach the signing agent); falls back to `git commit -S` directly. The
+#     commit must move HEAD AND carry a gpgsig header, or nothing is pushed (fail closed).
+#   push the branch, ensure the `fleet` label exists, open a PR with `gh`
 #
-# Stops on the FIRST .rej or red gate and prints the resume command (it never leaves an unsigned
-# commit on a pushed branch). Repo paths come from --repos-dir or $MCP_FLEET_ROOT; nothing here
-# hard-codes a machine path.
-set -euo pipefail
+# Stops on the FIRST .rej, red gate, or unsigned/failed commit and prints the resume command; it
+# never leaves an unsigned commit on a pushed branch, and a re-run skips finished repos. Repo
+# paths come from --repos-dir or $MCP_FLEET_ROOT; nothing here hard-codes a machine path.
+set -Eeuo pipefail
 
 REPOS=(mcp-argocd mcp-coda mcp-atlassian-extended mcp-gitlab)
 SIGN_TIMEOUT=120
-
-# --- cleanup / signals --------------------------------------------------------------------
-_current_repo=""
-cleanup() {
-  local code=$1
-  if [ -n "$_current_repo" ]; then
-    echo "fleet-update: interrupted while in $_current_repo (exit $code)." >&2
-    echo "  Its branch is left in place; inspect it, then re-run with the same version to resume." >&2
-  fi
-}
-trap 'cleanup 130; exit 130' INT
-trap 'cleanup 143; exit 143' TERM
+CHILD_PID=""
 
 die() { echo "fleet-update: $*" >&2; exit 1; }
+
+# --- signals / errors ---------------------------------------------------------------------
+_current_repo=""
+resume_hint() {
+  echo "  next: re-run  scripts/fleet-update.sh ${VERSION:-vX.Y.Z}${CODEMOD:+ --codemod $CODEMOD}" >&2
+  echo "        (it skips repos already on ${VERSION:-the version} and resumes a pushed branch)" >&2
+}
+on_signal() {  # $1 = exit code
+  trap - INT TERM ERR
+  # Stop any tracked foreground child (uvx/uv/git) so Ctrl-C/TERM does not orphan it.
+  # ponytail: kills the tracked subshell; a deep grandchild may outlive it — acceptable here.
+  [ -n "$CHILD_PID" ] && kill -TERM "$CHILD_PID" 2>/dev/null || true
+  [ -n "$_current_repo" ] && echo "fleet-update: interrupted in $_current_repo (exit $1); its branch is left in place." >&2
+  resume_hint
+  exit "$1"
+}
+on_err() {
+  local rc=$?
+  trap - INT TERM ERR
+  echo "::stop:: fleet-update failed in ${_current_repo:-startup} (exit $rc)" >&2
+  resume_hint
+  exit "$rc"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap on_err ERR
+
+# Run a (possibly long) command as a tracked child so the TERM/INT trap can stop it.
+_exec() { "$@" & CHILD_PID=$!; wait "$CHILD_PID"; local rc=$?; CHILD_PID=""; return "$rc"; }
 
 # --- argument parsing (pure; exercised by --self-test) ------------------------------------
 VERSION=""; CODEMOD=""; DRY_RUN=0; REPOS_DIR=""
@@ -56,49 +77,89 @@ parse_args() {
 
 # Echo-and-run; in --dry-run the mutating commands are printed, not executed.
 run() {
-  if [ "$DRY_RUN" = 1 ]; then echo "DRY  $*"; else echo "RUN  $*"; "$@"; fi
+  if [ "$DRY_RUN" = 1 ]; then echo "DRY  $*"; else echo "RUN  $*"; _exec "$@"; fi
 }
-
-# Same, but inside a repo dir (portable cd-subshell; macOS env lacks GNU's -C).
+# Same, but inside a repo dir (portable cd-subshell; macOS env lacks GNU env's -C).
 in_repo() {
   local d=$1; shift
-  if [ "$DRY_RUN" = 1 ]; then echo "DRY  (cd $d) $*"; else echo "RUN  (cd $d) $*"; ( cd "$d" && "$@" ); fi
+  if [ "$DRY_RUN" = 1 ]; then echo "DRY  (cd $d) $*"; else echo "RUN  (cd $d) $*"; _exec bash -c 'cd "$1" && shift && "$@"' _ "$d" "$@"; fi
 }
 
-signed_commit() {  # $1 = repo path, $2 = message-file, $3 = expected subject
-  local repo=$1 msgfile=$2 subject=$3
-  if [ "$DRY_RUN" = 1 ]; then echo "DRY  iterm-run git -C $repo commit -S -F $msgfile"; return 0; fi
-  local attempt
+# --- state probes (testable) --------------------------------------------------------------
+answers_commit_on_main() { git -C "$1" show origin/main:.copier-answers.yml 2>/dev/null \
+  | sed -n -E 's/^_commit: *["'"'"']?([^"'"'"']*)["'"'"']? *$/\1/p' | head -1; }
+remote_branch_exists()   { git -C "$1" ls-remote --exit-code --heads origin "$2" >/dev/null 2>&1; }
+local_branch_exists()    { git -C "$1" show-ref --verify --quiet "refs/heads/$2"; }
+head_moved()             { [ "$(git -C "$1" rev-parse HEAD)" != "$2" ]; }
+head_is_signed()         { git -C "$1" cat-file -p HEAD 2>/dev/null | grep -q '^gpgsig'; }
+
+ensure_label() {  # idempotent — the `fleet` label exists in none of the repos yet
+  in_repo "$1" env -u GH_TOKEN gh label create fleet --color ededed \
+    --description "template fan-out" 2>/dev/null || true
+}
+open_pr() { in_repo "$1" env -u GH_TOKEN gh pr create --fill --label fleet; }
+
+signed_commit() {  # $1 = repo path, $2 = message-file ; fail closed on unsigned/no-move
+  local repo=$1 msgfile=$2 runner="${FLEET_COMMIT_RUNNER:-}" before attempt waited
+  if [ "$DRY_RUN" = 1 ]; then echo "DRY  commit -S via \${FLEET_COMMIT_RUNNER:-git} in $repo"; return 0; fi
+  before=$(git -C "$repo" rev-parse HEAD)
   for attempt in 1 2; do
-    ~/.local/bin/iterm-run "git -C '$repo' commit -S -F '$msgfile'" || true
-    local waited=0
+    if [ -n "$runner" ]; then "$runner" "git -C '$repo' commit -S -F '$msgfile'" || true
+    else git -C "$repo" commit -S -F "$msgfile" || true; fi
+    waited=0
     while [ "$waited" -lt "$SIGN_TIMEOUT" ]; do
-      if git -C "$repo" log --oneline -1 --format='%s' | grep -qF "$subject"; then
-        echo "  signed commit landed: $(git -C "$repo" log --oneline -1)"; return 0
+      if head_moved "$repo" "$before"; then
+        if head_is_signed "$repo"; then
+          echo "  signed commit landed: $(git -C "$repo" log --oneline -1)"; return 0
+        fi
+        echo "::stop:: commit $(git -C "$repo" rev-parse --short HEAD) is UNSIGNED — not pushing" >&2
+        return 1  # fail closed: do not retry into a second unsigned commit
       fi
       sleep 3; waited=$((waited + 3))
     done
-    echo "  signing attempt $attempt did not produce a commit within ${SIGN_TIMEOUT}s" >&2
+    echo "  signing attempt $attempt produced no commit within ${SIGN_TIMEOUT}s" >&2
   done
   return 1
 }
 
 update_one() {  # $1 = repo path
-  local repo=$1 name branch msg subject
+  local repo=$1 name branch msg before
   name=$(basename "$repo")
   branch="chore/fleet-$VERSION"
   _current_repo="$name"
   echo "═══ $name ═══"
 
   [ -d "$repo/.git" ] || die "$repo is not a git checkout"
+  run git -C "$repo" fetch origin --quiet
+
+  # Skip: origin/main already carries this template version.
+  if [ "$(answers_commit_on_main "$repo")" = "$VERSION" ]; then
+    echo "skip $name: origin/main is already on $VERSION"; _current_repo=""; return 0
+  fi
+  # Skip: a fan-out branch is already pushed — report its PR and leave it for review/landing.
+  if remote_branch_exists "$repo" "$branch"; then
+    local pr; pr=$( (cd "$repo" && env -u GH_TOKEN gh pr list --head "$branch" --json url --jq '.[0].url' 2>/dev/null) || true)
+    echo "skip $name: remote branch $branch already exists (PR: ${pr:-none}); land or close it, then re-run"
+    _current_repo=""; return 0
+  fi
+  # Resume: a local-only branch exists — verify it is signed, push it, open the PR.
+  if local_branch_exists "$repo" "$branch"; then
+    echo "resume $name: local $branch exists but is not pushed"
+    run git -C "$repo" switch "$branch"
+    if [ "$DRY_RUN" != 1 ]; then
+      head_is_signed "$repo" || { echo "::stop:: $name $branch HEAD is unsigned — re-sign before pushing" >&2; exit 1; }
+    fi
+    run git -C "$repo" push -u origin "$branch"
+    ensure_label "$repo"; open_pr "$repo"; _current_repo=""; return 0
+  fi
+
+  # Fresh run.
   if [ -n "$(git -C "$repo" status --porcelain)" ]; then
     if [ "$DRY_RUN" = 1 ]; then echo "WARN $name is dirty; a real run would refuse it (copier needs a clean tree)";
     else die "$name working tree is dirty; copier refuses a dirty tree"; fi
   fi
 
-  run git -C "$repo" fetch origin --quiet
   run git -C "$repo" switch -c "$branch" origin/main
-
   in_repo "$repo" uvx copier update --trust --defaults --conflict rej -r "$VERSION"
 
   if [ "$DRY_RUN" != 1 ] && find "$repo" -name '*.rej' -print -quit | grep -q .; then
@@ -107,33 +168,30 @@ update_one() {  # $1 = repo path
     exit 1
   fi
 
-  if [ -n "$CODEMOD" ]; then
-    in_repo "$repo" uv run --with libcst python "$CODEMOD" src tests
-  fi
+  [ -n "$CODEMOD" ] && in_repo "$repo" uv run --with libcst python "$CODEMOD" src tests
 
   in_repo "$repo" uv run ruff format .
   in_repo "$repo" uv run ruff check --fix .
   in_repo "$repo" uv run pytest -q
   in_repo "$repo" uv run ruff check .
-  if [ "$DRY_RUN" != 1 ] && grep -q '^pyright: true' "$repo/.copier-answers.yml" 2>/dev/null; then
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "DRY  (cd $repo) uv run pyright   # only when the answers set pyright: true"
+  elif grep -q '^pyright: true' "$repo/.copier-answers.yml" 2>/dev/null; then
     in_repo "$repo" uv run pyright
   fi
 
-  subject="chore(fleet): template $VERSION"
   msg="$repo/.internal/fleet-msg.txt"
-  if [ "$DRY_RUN" != 1 ]; then
-    mkdir -p "$repo/.internal"
-    printf '%s\n\nAdopt vish288/.github template %s (stubs, Dockerfile, ruff.toml, dependabot).\n' "$subject" "$VERSION" > "$msg"
-    git -C "$repo" add -A
-  fi
+  mkdir -p "$repo/.internal"
+  printf 'chore(fleet): template %s\n\nUpdate to the vish288/.github template %s (stubs, Dockerfile, ruff.toml, dependabot).\n' "$VERSION" "$VERSION" > "$msg"
+  run git -C "$repo" add -A
 
-  signed_commit "$repo" "$msg" "$subject" || {
-    echo "::stop:: signing failed in $name after one retry — nothing pushed; re-sign locally, then re-run" >&2
+  signed_commit "$repo" "$msg" || {
+    echo "::stop:: signing failed in $name — nothing pushed; re-sign locally, then re-run" >&2
     exit 1
   }
 
   run git -C "$repo" push -u origin "$branch"
-  in_repo "$repo" env -u GH_TOKEN gh pr create --fill --label fleet
+  ensure_label "$repo"; open_pr "$repo"
   _current_repo=""
 }
 
@@ -141,30 +199,67 @@ main() {
   parse_args "$@" || exit 2
   [ -n "$REPOS_DIR" ] || die "set --repos-dir or \$MCP_FLEET_ROOT to the directory holding the mcp-* checkouts"
   [ -d "$REPOS_DIR" ] || die "repos dir not found: $REPOS_DIR"
-  echo "fleet-update $VERSION  (dry-run=$DRY_RUN, codemod=${CODEMOD:-none}, repos-dir=$REPOS_DIR)"
+  echo "fleet-update $VERSION  (dry-run=$DRY_RUN, codemod=${CODEMOD:-none}, repos-dir=$REPOS_DIR, runner=${FLEET_COMMIT_RUNNER:-git -S})"
   for r in "${REPOS[@]}"; do
     update_one "$REPOS_DIR/$r"
   done
   echo "fleet-update: all repos done."
 }
 
-# --- self-test: argument handling only, no side effects -----------------------------------
+# --- self-test ----------------------------------------------------------------------------
 self_test() {
-  set +e  # parse_args returns non-zero on purpose below; do not let set -e abort
-  local rc
+  set +e
+  trap - ERR
+  local rc fail=0
+  _t() { if "$@"; then echo "  ok   $1"; else echo "  FAIL $*"; fail=1; fi; }
+
+  # argument handling
   parse_args v1.2.0 >/dev/null 2>&1; rc=$?
-  [ "$rc" = 0 ] && [ "$VERSION" = v1.2.0 ] && [ "$DRY_RUN" = 0 ] || { echo "FAIL: plain version"; return 1; }
+  [ "$rc" = 0 ] && [ "$VERSION" = v1.2.0 ] && [ "$DRY_RUN" = 0 ] && echo "  ok   plain version" || { echo "  FAIL plain version"; fail=1; }
   parse_args v1.2.0 --dry-run --codemod /x/cm.py >/dev/null 2>&1; rc=$?
-  [ "$rc" = 0 ] && [ "$DRY_RUN" = 1 ] && [ "$CODEMOD" = /x/cm.py ] || { echo "FAIL: flags"; return 1; }
+  [ "$rc" = 0 ] && [ "$DRY_RUN" = 1 ] && [ "$CODEMOD" = /x/cm.py ] && echo "  ok   flags" || { echo "  FAIL flags"; fail=1; }
   parse_args --repos-dir /tmp/r v2.0.1 >/dev/null 2>&1; rc=$?
-  [ "$rc" = 0 ] && [ "$REPOS_DIR" = /tmp/r ] && [ "$VERSION" = v2.0.1 ] || { echo "FAIL: repos-dir"; return 1; }
-  parse_args >/dev/null 2>&1; [ $? = 2 ] || { echo "FAIL: missing version not rejected"; return 1; }
-  parse_args 1.2.0 >/dev/null 2>&1; [ $? = 2 ] || { echo "FAIL: non-v semver not rejected"; return 1; }
-  parse_args v1.2 >/dev/null 2>&1; [ $? = 2 ] || { echo "FAIL: short semver not rejected"; return 1; }
-  parse_args v1.2.0 v1.3.0 >/dev/null 2>&1; [ $? = 2 ] || { echo "FAIL: two versions not rejected"; return 1; }
-  parse_args v1.2.0 --bogus >/dev/null 2>&1; [ $? = 2 ] || { echo "FAIL: unknown flag not rejected"; return 1; }
-  parse_args v1.2.0 --codemod >/dev/null 2>&1; [ $? = 2 ] || { echo "FAIL: --codemod needs an argument"; return 1; }
-  echo "fleet-update self-test: OK"
+  [ "$rc" = 0 ] && [ "$REPOS_DIR" = /tmp/r ] && echo "  ok   repos-dir" || { echo "  FAIL repos-dir"; fail=1; }
+  for bad in "" "1.2.0" "v1.2" "v1.2.0 v1.3.0" "v1.2.0 --bogus" "v1.2.0 --codemod"; do
+    # shellcheck disable=SC2086
+    parse_args $bad >/dev/null 2>&1
+    [ $? = 2 ] && echo "  ok   reject [$bad]" || { echo "  FAIL accept [$bad]"; fail=1; }
+  done
+
+  # resume/skip + signing probes against throwaway git repos
+  local tmp; tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  ( # a bare "origin" plus a clone whose origin/main carries _commit: v1.2.0.
+    # origin/main is set with update-ref, not a push: the global signed-push guard blocks
+    # unsigned pushes to default branches, and the test commits are deliberately unsigned.
+    set -e
+    git init -q -b main --bare "$tmp/origin.git"
+    git clone -q "$tmp/origin.git" "$tmp/repo"
+    cd "$tmp/repo"
+    git -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    printf '_commit: v1.2.0\n_src_path: x\n' > .copier-answers.yml
+    git add -A; git -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q -m answers
+    git update-ref refs/remotes/origin/main HEAD
+  ) >/dev/null 2>&1 || { echo "  FAIL could not build temp repos"; return 1; }
+
+  answers_commit_on_main "$tmp/repo" | grep -qx v1.2.0 && echo "  ok   answers_commit_on_main reads _commit" || { echo "  FAIL answers_commit_on_main"; fail=1; }
+  VERSION=v1.2.0; [ "$(answers_commit_on_main "$tmp/repo")" = "$VERSION" ] && echo "  ok   skip: on-version detected" || { echo "  FAIL skip on-version"; fail=1; }
+  VERSION=v1.3.0; [ "$(answers_commit_on_main "$tmp/repo")" != "$VERSION" ] && echo "  ok   no-skip: newer version" || { echo "  FAIL no-skip newer"; fail=1; }
+
+  git -C "$tmp/repo" branch chore/fleet-v9.9.9 >/dev/null 2>&1
+  local_branch_exists "$tmp/repo" chore/fleet-v9.9.9 && echo "  ok   local_branch_exists" || { echo "  FAIL local_branch_exists"; fail=1; }
+  ! remote_branch_exists "$tmp/repo" chore/fleet-v9.9.9 && echo "  ok   remote_branch_exists false before push" || { echo "  FAIL remote_branch_exists"; fail=1; }
+  git -C "$tmp/repo" push -q origin chore/fleet-v9.9.9 >/dev/null 2>&1
+  git -C "$tmp/repo" fetch -q origin
+  remote_branch_exists "$tmp/repo" chore/fleet-v9.9.9 && echo "  ok   remote_branch_exists true after push" || { echo "  FAIL remote_branch_exists post-push"; fail=1; }
+
+  # HEAD-moved + gpgsig: an ordinary (unsigned) commit must be rejected (fail closed)
+  local before; before=$(git -C "$tmp/repo" rev-parse HEAD)
+  git -C "$tmp/repo" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m more
+  head_moved "$tmp/repo" "$before" && echo "  ok   head_moved detects a new commit" || { echo "  FAIL head_moved"; fail=1; }
+  ! head_is_signed "$tmp/repo" && echo "  ok   head_is_signed rejects an unsigned commit" || { echo "  FAIL head_is_signed false-positive"; fail=1; }
+
+  [ "$fail" = 0 ] && echo "fleet-update self-test: OK" || { echo "fleet-update self-test: FAILED"; return 1; }
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi

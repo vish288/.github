@@ -60,7 +60,8 @@ jobs:
 Rules:
 
 - **Pin the commit SHA with a `# vX.Y.Z` comment** naming the release tag it points at —
-  immutable ref, Dependabot-bumpable.
+  an immutable ref. Copier renders these pins from the template tag and `scripts/fleet-update.sh`
+  moves them on each release; Dependabot ignores `vish288/.github` refs (see the template section).
 - **Triggers stay on the stub.** `schedule`, `workflow_run`, `workflow_dispatch`, `push`,
   `pull_request` only fire for a workflow that physically lives in the server repo, so the
   stub owns `on:` and forwards inputs. A reusable workflow can only be entered via
@@ -101,9 +102,12 @@ that claim points at `vish288/.github` — so the mint fails (warehouse#11096; t
 
 Tags are semver only (`vX.Y.Z`) and never move; there is no floating major tag. Servers pin the
 tag's commit SHA with a `# vX.Y.Z` comment
-(`uses: vish288/.github/.github/workflows/<name>.yml@<sha> # v1.0.0`), so the ref is immutable and
-Dependabot's `github-actions` updater bumps the SHA to the next release. Breaking an input or the
-stub contract bumps the major (`v2.0.0`).
+(`uses: vish288/.github/.github/workflows/<name>.yml@<sha> # v1.0.0`), so the ref is immutable.
+Copier renders these pins from the template tag's commit and `scripts/fleet-update.sh` moves them
+on each release; Dependabot **ignores** `vish288/.github` refs (the templated `dependabot.yml`
+carries the ignore) so it does not fight Copier over the pins — it keeps bumping only the
+third-party actions that live inside the reusables here. Breaking an input or the stub contract
+bumps the major (`v2.0.0`).
 
 ## Copier template
 
@@ -122,9 +126,9 @@ so only `template/` is rendered — `copier.yml`, `scripts/` and `tests/` stay o
 | `pyright` | bool | lint + release stubs | false / false / false / true |
 | `llms_split_marker` | str | lint + release stubs (derive drift) | `\n## Configuration` / `…` / `\n## Environment Variables` / `\n## Setup Examples` |
 
-`package` is derived in Jinja, not asked. The stubs forward `coverage_min` always, `pyright` only
-when true, and `llms_split_marker` only when it differs from the default — so argocd (all
-defaults) renders byte-identical to its hand-written stubs.
+The stubs forward `coverage_min` always, `pyright` only when true, and `llms_split_marker` only
+when it differs from the default — so argocd (all defaults) renders byte-identical to its
+hand-written stubs.
 
 ### Bracket delimiters (why `${{ }}` survives)
 
@@ -172,10 +176,14 @@ A template release reaches the servers through `scripts/fleet-update.sh vX.Y.Z [
 run by the owner locally. It loops argocd → coda → atlassian-extended → gitlab:
 `copier update --trust --defaults --conflict rej -r vX.Y.Z` (the `-r` pins the tag), optional
 codemod over `src/ tests/`, `ruff format` + `ruff check --fix`, then the server's own gates
-(`pytest -q`, `ruff check`, `pyright` when the repo ships it), a signed commit via
-`iterm-run` (the sandbox shell has no 1Password login; it polls `git log` up to 120 s), a branch
-push and a PR. It stops on the first `*.rej` or red gate and never leaves an unsigned commit on a
-pushed branch. `--dry-run` previews; repo paths come from `--repos-dir` or `$MCP_FLEET_ROOT` (no
+(`pytest -q`, `ruff check`, `pyright` when the repo ships it), a signed commit, a branch push and
+a PR (ensuring the `fleet` label first). The commit goes through `$FLEET_COMMIT_RUNNER` — a
+command that runs a shell string in a login session that can reach the signing agent (a sandbox
+shell cannot) — falling back to `git commit -S` directly; the script verifies HEAD moved **and**
+carries a `gpgsig` header before pushing, so an unsigned commit is never pushed (fail closed). It
+stops on the first `*.rej`, red gate or unsigned/failed commit, prints the resume command, and a
+re-run skips repos already on the version and resumes a pushed branch. `--dry-run` previews; repo
+paths come from `--repos-dir` or `$MCP_FLEET_ROOT` (no
 machine path is baked in). Dependabot `ignore`s `vish288/.github` refs in the templated
 `dependabot.yml` so it does not fight Copier over the stub pins; the reusable `lint.yml` carries
 an advisory drift warning comparing `.copier-answers` `_commit` against the latest semver tag.
