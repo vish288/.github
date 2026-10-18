@@ -4,7 +4,7 @@ name: Semantic Release
 # workflow_dispatch UI and forwards its inputs here. This runs in the caller's context, so
 # the checkout, git history, version files and GITHUB_REPOSITORY are the server's. The
 # shared derive_artifacts.py / retry.sh live in this repo and are checked out into .ci/ at
-# this workflow's own ref (github.job_workflow_sha); derive_artifacts.py operates on the
+# this workflow's own ref (job.workflow_sha); derive_artifacts.py operates on the
 # current working directory (the caller checkout).
 #
 # workflow_call inputs cannot be `choice`, so bump / publish_fail_at are strings; the caller
@@ -74,7 +74,8 @@ jobs:
       - name: Guard job.workflow_sha
         env:
           WF_SHA: ${{ job.workflow_sha }}
-        run: '[ -n "$WF_SHA" ] || { echo "::error::job.workflow_sha is empty; cannot fetch CI scripts"; exit 1; }'
+          WF_REPO: ${{ job.workflow_repository }}
+        run: '[ -n "$WF_SHA" ] && [ -n "$WF_REPO" ] || { echo "::error::job.workflow_sha or job.workflow_repository is empty; cannot fetch CI scripts"; exit 1; }'
       - name: Fetch shared CI scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -30,27 +30,27 @@ directory, which is the calling server's checkout.
 
 ## Using it from a server repo
 
-Pin every stub to a tag (`@v1`). Example `tests.yml`:
+Pin every stub to a release commit SHA. Example `tests.yml`:
 
 ```yaml
 name: Tests
 on: [push, pull_request]
 jobs:
   test:
-    uses: vish288/.github/.github/workflows/tests.yml@<sha> # v1
+    uses: vish288/.github/.github/workflows/tests.yml@<sha> # v1.0.0
     with:
       coverage_min: 98
 ```
 
-Pin the commit SHA with a `# v1` comment (not the moving `@v1` tag) so Dependabot bumps it.
+Pin the commit SHA with a `# vX.Y.Z` comment so the ref is immutable and Dependabot bumps it.
 See `AGENTS.md` for the full stub contract, including the `publish.yml` / PyPI
 trusted-publishing requirement.
 
 ## Versioning
 
-Tags are `vN` majors (`v1`) that move forward within a compatible line. Servers pin the
-commit SHA with a `# v1` comment so the ref is immutable and Dependabot bumps the SHA when
-`v1` moves. A breaking change to an input or contract is `v2`.
+Tags are semver only (`vX.Y.Z`) and never move. Servers pin the tag's commit SHA with a
+`# vX.Y.Z` comment, and Dependabot bumps the SHA to the next release. A breaking change to an
+input or contract bumps the major (`v2.0.0`).
 
 ## License
 

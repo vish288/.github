@@ -51,7 +51,7 @@ Each server replaces its six workflows with stubs of the form:
 ```yaml
 jobs:
   <job>:
-    uses: vish288/.github/.github/workflows/<name>.yml@<sha> # v1
+    uses: vish288/.github/.github/workflows/<name>.yml@<sha> # v1.0.0
     # with: ...          inputs
     # secrets: { NAME: ${{ secrets.NAME }} }   pass by name, never `inherit`
     # permissions: ...    the reusable can only narrow what the caller grants
@@ -59,10 +59,8 @@ jobs:
 
 Rules:
 
-- **Pin the commit SHA with a `# v1` comment**, not the moving `@v1` tag — immutable ref,
-  Dependabot-bumpable. During the R1 pilot the stubs pin the R1a branch head SHA so CI can run
-  before `v1` exists; the orchestrator re-points them to the `v1` commit SHA after R1a lands
-  and is tagged.
+- **Pin the commit SHA with a `# vX.Y.Z` comment** naming the release tag it points at —
+  immutable ref, Dependabot-bumpable.
 - **Triggers stay on the stub.** `schedule`, `workflow_run`, `workflow_dispatch`, `push`,
   `pull_request` only fire for a workflow that physically lives in the server repo, so the
   stub owns `on:` and forwards inputs. A reusable workflow can only be entered via
@@ -101,11 +99,11 @@ that claim points at `vish288/.github` — so the mint fails (warehouse#11096; t
 
 ## Versioning
 
-Tags are `vN` majors (`v1`) that move forward within a compatible line. Servers do **not**
-pin the moving `@v1` tag directly; they pin the commit SHA with a `# v1` comment
-(`uses: vish288/.github/.github/workflows/<name>.yml@<sha> # v1`) so the ref is immutable and
-Dependabot's `github-actions` updater bumps the SHA when `v1` moves. Breaking an input or the
-stub contract is a new major (`v2`).
+Tags are semver only (`vX.Y.Z`) and never move; there is no floating major tag. Servers pin the
+tag's commit SHA with a `# vX.Y.Z` comment
+(`uses: vish288/.github/.github/workflows/<name>.yml@<sha> # v1.0.0`), so the ref is immutable and
+Dependabot's `github-actions` updater bumps the SHA to the next release. Breaking an input or the
+stub contract bumps the major (`v2.0.0`).
 
 ## Conventions
 
