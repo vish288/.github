@@ -18,7 +18,7 @@ real workflows here.
 
 | Path | Contents |
 | --- | --- |
-| `.github/workflows/tests.yml` | reusable pytest matrix (3.10–3.13); inputs `coverage_min`, `upload_coverage` |
+| `.github/workflows/tests.yml` | reusable pytest matrix (3.10–3.14); inputs `coverage_min`, `upload_coverage` |
 | `.github/workflows/lint.yml` | reusable ruff check + format; input `pyright` |
 | `.github/workflows/link-check.yml` | reusable weekly doc-link check (`pytest -m network`) |
 | `.github/workflows/release.yml` | reusable release: gate on tests/lint, bump versions, derive artifacts, verified release commit + tag, dispatch publish |
