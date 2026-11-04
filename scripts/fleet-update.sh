@@ -25,6 +25,9 @@ set -Eeuo pipefail
 REPOS=(mcp-argocd mcp-coda mcp-atlassian-extended mcp-gitlab)
 SIGN_TIMEOUT=120
 CHILD_PID=""
+# This checkout IS the template at the target tag, so its derive_artifacts.py is the one the
+# server's lint drift check will run after the pins move to $VERSION.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 die() { echo "fleet-update: $*" >&2; exit 1; }
 
@@ -88,6 +91,26 @@ in_repo() {
 # --- state probes (testable) --------------------------------------------------------------
 answers_commit_on_main() { git -C "$1" show origin/main:.copier-answers.yml 2>/dev/null \
   | sed -n -E 's/^_commit: *["'"'"']?([^"'"'"']*)["'"'"']? *$/\1/p' | head -1; }
+
+# The llms.txt cut heading the server configured, read from its .copier-answers.yml. The value is
+# a (possibly multi-line) YAML scalar — e.g. `\n## Setup Examples` — so parse it with a real YAML
+# loader, not sed. Empty when the answer is absent (default `\n## Configuration`, which
+# derive_artifacts.py supplies itself). Runs on the owner's machine, where uv is on PATH.
+read_marker() {  # $1 = repo path
+  ( cd "$1" && uv run --no-project --with pyyaml python3 -c \
+      'import yaml,sys; sys.stdout.write(yaml.safe_load(open(".copier-answers.yml")).get("llms_split_marker") or "")' )
+}
+
+# Regenerate the version-derived artifacts (llms.txt, gemini-extension.json) with THIS tag's
+# derive_artifacts.py. After copier moves the stub pins to $VERSION, the server's lint drift check
+# runs this tag's derive_artifacts.py — which pins gemini-extension.json's uvx args to the server
+# version — so the committed artifacts must be regenerated here, or that check fails on the fan-out
+# PR. The following `git add -A` stages the rewritten files.
+regen_artifacts() {  # $1 = repo path
+  local repo=$1 marker
+  marker=$(read_marker "$repo")
+  in_repo "$repo" env LLMS_SPLIT_MARKER="$marker" python3 "$SCRIPT_DIR/derive_artifacts.py"
+}
 remote_branch_exists()   { git -C "$1" ls-remote --exit-code --heads origin "$2" >/dev/null 2>&1; }
 local_branch_exists()    { git -C "$1" show-ref --verify --quiet "refs/heads/$2"; }
 head_moved()             { [ "$(git -C "$1" rev-parse HEAD)" != "$2" ]; }
@@ -210,6 +233,12 @@ update_one() {  # $1 = repo path
     in_repo "$repo" uv run pyright
   fi
 
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "DRY  (cd $repo) LLMS_SPLIT_MARKER=<.copier-answers llms_split_marker> python3 $SCRIPT_DIR/derive_artifacts.py"
+  else
+    regen_artifacts "$repo"
+  fi
+
   msg="$repo/.internal/fleet-msg.txt"
   if [ "$DRY_RUN" != 1 ]; then
     mkdir -p "$repo/.internal"
@@ -236,6 +265,9 @@ main() {
   parse_args "$@" || exit 2
   [ -n "$REPOS_DIR" ] || die "set --repos-dir or \$MCP_FLEET_ROOT to the directory holding the mcp-* checkouts"
   [ -d "$REPOS_DIR" ] || die "repos dir not found: $REPOS_DIR"
+  # derive_artifacts.py comes from this checkout, the stubs from the tag; they must agree.
+  [ "$(git -C "$SCRIPT_DIR" describe --exact-match --tags HEAD 2>/dev/null)" = "$VERSION" ] \
+    || die "run from a vish288/.github checkout at $VERSION (git -C <checkout> checkout $VERSION)"
   echo "fleet-update $VERSION  (dry-run=$DRY_RUN, codemod=${CODEMOD:-none}, repos-dir=$REPOS_DIR, runner=${FLEET_COMMIT_RUNNER:-git -S})"
   for r in "${REPOS[@]}"; do
     update_one "$REPOS_DIR/$r"
@@ -307,6 +339,33 @@ self_test() {
   : > "$tmp/repo/dirty.txt"
   ! range_all_signed "$tmp/repo" && echo "  ok   range refuses a dirty tree" || { echo "  FAIL range accepted dirty tree"; fail=1; }
   rm -f "$tmp/repo/dirty.txt"
+
+  # regen_artifacts: derive_artifacts.py (resolved via SCRIPT_DIR) must rewrite llms.txt +
+  # gemini-extension.json with the version-pinned uvx args, and `git add -A` must stage them. The
+  # cut marker is set directly here so the test needs no uv/network; read_marker is checked below
+  # when uv is available, and exercised live during fan-out.
+  git -C "$tmp/repo" switch -q -c regen origin/main
+  ( set -e
+    cd "$tmp/repo"
+    printf '{ "name": "io.github.x/thing", "description": "d", "version": "9.9.9", "packages": [ { "identifier": "mcp-thing", "version": "9.9.9", "environmentVariables": [] } ] }\n' > server.json
+    printf '# Thing\n\nIntro.\n\n## Configuration\n\nfull only\n' > llms-full.txt
+    env LLMS_SPLIT_MARKER=$'\n## Configuration' python3 "$SCRIPT_DIR/derive_artifacts.py"
+    git add -A
+  ) >/dev/null 2>&1 \
+    && grep -q '"mcp-thing@9.9.9"' "$tmp/repo/gemini-extension.json" 2>/dev/null \
+    && git -C "$tmp/repo" diff --cached --name-only | grep -qx gemini-extension.json \
+    && git -C "$tmp/repo" diff --cached --name-only | grep -qx llms.txt \
+    && echo "  ok   regen_artifacts derives version-pinned artifacts and stages them" \
+    || { echo "  FAIL regen_artifacts"; fail=1; }
+
+  # read_marker parses a multi-line YAML scalar (needs uv+pyyaml; skip if uv is absent).
+  if command -v uv >/dev/null 2>&1; then
+    printf "_commit: v1.2.0\nllms_split_marker: '\n\n  ## Setup Examples'\n" > "$tmp/repo/.copier-answers.yml"
+    [ "$(read_marker "$tmp/repo")" = $'\n## Setup Examples' ] \
+      && echo "  ok   read_marker parses a multi-line marker" || { echo "  FAIL read_marker"; fail=1; }
+  else
+    echo "  skip read_marker (uv not on PATH)"
+  fi
 
   [ "$fail" = 0 ] && echo "fleet-update self-test: OK" || { echo "fleet-update self-test: FAILED"; return 1; }
 }

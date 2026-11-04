@@ -57,7 +57,7 @@ def main() -> int:
         gemini = json.loads((root / "gemini-extension.json").read_text(encoding="utf-8"))
         assert gemini["name"] == "mcp-thing", gemini
         assert gemini["version"] == "1.2.3", gemini
-        assert gemini["mcpServers"]["mcp-thing"] == {"command": "uvx", "args": ["mcp-thing"]}
+        assert gemini["mcpServers"]["mcp-thing"] == {"command": "uvx", "args": ["mcp-thing@1.2.3"]}
         assert gemini["settings"] == [
             {
                 "name": "THING_TOKEN",

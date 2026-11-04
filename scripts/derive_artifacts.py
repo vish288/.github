@@ -44,7 +44,7 @@ def derive_gemini_extension() -> str:
         "name": identifier,
         "version": server["version"],
         "description": server["description"],
-        "mcpServers": {identifier: {"command": "uvx", "args": [identifier]}},
+        "mcpServers": {identifier: {"command": "uvx", "args": [f"{identifier}@{server['version']}"]}},
         "settings": [
             {
                 "name": env["name"],

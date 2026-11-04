@@ -18,7 +18,7 @@ real workflows here.
 
 | Path | Contents |
 | --- | --- |
-| `.github/workflows/tests.yml` | reusable pytest matrix (3.10–3.14); inputs `coverage_min`, `upload_coverage` |
+| `.github/workflows/tests.yml` | reusable pytest matrix (3.11–3.14); inputs `coverage_min`, `upload_coverage` |
 | `.github/workflows/lint.yml` | reusable ruff check + format; input `pyright` |
 | `.github/workflows/link-check.yml` | reusable weekly doc-link check (`pytest -m network`) |
 | `.github/workflows/release.yml` | reusable release: gate on tests/lint, bump versions, derive artifacts, verified release commit + tag, dispatch publish |
@@ -43,6 +43,26 @@ scripts read this repo's (absent) `pyproject.toml` / `server.json`.
 `\n## Configuration`). The servers differ: argocd/gitlab `## Configuration`, atlassian
 `## Environment Variables`, coda `## Setup Examples` — each passes its own via the
 `release.yml` input `llms_split_marker`.
+
+### Install-snippet version pinning
+
+Install snippets pin the released version (`uvx mcp-x@X.Y.Z`) so a copied command installs the
+version the docs describe:
+
+- `derive_artifacts.py` emits `uvx` args as `f"{identifier}@{version}"`, so
+  `gemini-extension.json` carries `args: ["mcp-x@X.Y.Z"]`.
+- `release.yml` (the "Pin uvx install snippets" step) runs `scripts/pin_install_snippets.sh`,
+  which rewrites `<pkg>[extras]@X.Y.Z` in `README.md` and `llms-full.txt` to the new version and
+  adds both files to the verified release commit tree. It anchors on **this server's own package
+  identifier** (`server.json` `packages[0].identifier`) with a strict `X.Y.Z` version, so: another
+  tool's pin (`uvx ruff@0.6.9`) is never touched; trailing punctuation (`…@0.21.3.`) survives;
+  extras (`mcp-x[http]@…`), JSON args (`"mcp-x@…"`) and `uvx --from mcp-x@…` are all covered; and a
+  bare `uvx mcp-x` "try it" line (no `@version`) matches nothing. `ci.yml` runs the script's
+  `--self-test`, so the workflow and the test share one implementation and cannot drift.
+
+Each server carries the pinned form via a one-time `docs:` change (adding `@<current>`); release
+keeps it current thereafter. `README.md` is per-server (not Copier-owned), which is why
+`release.yml` — not the template — rewrites it.
 
 ## The stub contract (what each server keeps)
 

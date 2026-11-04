@@ -94,7 +94,7 @@ jobs:
           }
 
       - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
 
@@ -141,6 +141,14 @@ jobs:
           for f in llms-full.txt; do
             [ -f "$f" ] && sed -i 's/^- \*\*Version\*\*: .*/- **Version**: ${{ steps.next.outputs.version }}/' "$f"
           done
+
+      - name: Pin uvx install snippets to the new version
+        env:
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+        # Rewrites <pkg>[extras]@X.Y.Z in README.md/llms-full.txt, anchored on this server's own
+        # package identifier (server.json) with a strict semver — so another tool's pin and a bare
+        # `uvx <pkg>` try-it line are left intact. Shared with ci.yml's self-test (no drift).
+        run: .ci/scripts/pin_install_snippets.sh "$NEXT_VERSION"
 
       - name: Update server.json version
         env:
@@ -255,6 +263,7 @@ jobs:
           PYPROJECT_BLOB=$(create_blob pyproject.toml)
           UVLOCK_BLOB=$(create_blob uv.lock)
           CHANGELOG_BLOB=$(create_blob CHANGELOG.md)
+          README_BLOB=$(create_blob README.md)
           LLMS_BLOB=$(create_blob llms.txt)
           LLMS_FULL_BLOB=$(create_blob llms-full.txt)
           SERVER_JSON_BLOB=$(create_blob server.json)
@@ -269,6 +278,7 @@ jobs:
               { "path": "pyproject.toml",         "mode": "100644", "type": "blob", "sha": "$PYPROJECT_BLOB" },
               { "path": "uv.lock",                "mode": "100644", "type": "blob", "sha": "$UVLOCK_BLOB" },
               { "path": "CHANGELOG.md",           "mode": "100644", "type": "blob", "sha": "$CHANGELOG_BLOB" },
+              { "path": "README.md",              "mode": "100644", "type": "blob", "sha": "$README_BLOB" },
               { "path": "llms.txt",               "mode": "100644", "type": "blob", "sha": "$LLMS_BLOB" },
               { "path": "llms-full.txt",          "mode": "100644", "type": "blob", "sha": "$LLMS_FULL_BLOB" },
               { "path": "server.json",            "mode": "100644", "type": "blob", "sha": "$SERVER_JSON_BLOB" },
