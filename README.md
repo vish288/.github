@@ -90,9 +90,9 @@ Tags are semver only (`vX.Y.Z`) and never move. Servers pin the tag's commit SHA
 release, and Dependabot ignores `vish288/.github` refs. A breaking change to an input or contract
 bumps the major (`v2.0.0`).
 
-### v1.2.0 — breaking for adopters
+### v1.3.0 — breaking for adopters
 
-Despite the minor version, **v1.2.0 is a breaking update for a server that adopts it**, so a
+Despite the minor version, **v1.3.0 is a breaking update for a server that adopts it**, so a
 fan-out PR cannot be a no-op:
 
 - The test matrix drops Python 3.10 (3.11–3.14). A server that moves to this pin must also
