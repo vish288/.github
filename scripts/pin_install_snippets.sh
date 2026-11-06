@@ -32,7 +32,9 @@ pin() {
 }
 
 _tmpd=""
-cleanup() { [ -n "$_tmpd" ] && rm -rf "$_tmpd"; }
+self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+# Must return 0: on a normal end the EXIT trap's status becomes the script's exit code.
+cleanup() { [ -z "$_tmpd" ] || rm -rf "$_tmpd"; }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
@@ -68,6 +70,15 @@ EOF
     echo "ok   pin_install_snippets"
   else
     echo "FAIL pin_install_snippets"; fail=1
+  fi
+  # The real entry point (as release.yml calls it) must exit 0 and rewrite in place.
+  mkdir "$d/srv"
+  printf '{"packages":[{"identifier":"mcp-gitlab"}]}' > "$d/srv/server.json"
+  printf 'uvx mcp-gitlab@0.1.0\n' > "$d/srv/README.md"
+  if (cd "$d/srv" && bash "$self" 1.2.3) && grep -q 'mcp-gitlab@1.2.3' "$d/srv/README.md"; then
+    echo "ok   pin_install_snippets main"
+  else
+    echo "FAIL pin_install_snippets main"; fail=1
   fi
   return "$fail"
 }
