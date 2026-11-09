@@ -1,6 +1,8 @@
 name: Lint
 # Stub -> vish288/.github.
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   lint:
     uses: vish288/.github/.github/workflows/lint.yml@PIN
