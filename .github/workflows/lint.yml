@@ -37,7 +37,7 @@ jobs:
         # 2025-12-11 is the schema version the registry currently serves and accepts
         # (registry record $schema, verified 2026-11-09). Bump this URL when the registry
         # moves to a newer schema.
-        run: uvx check-jsonschema --schemafile https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json server.json
+        run: uvx check-jsonschema==0.39.0 --schemafile https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json server.json
       - name: Guard job.workflow_sha
         env:
           WF_SHA: ${{ job.workflow_sha }}
