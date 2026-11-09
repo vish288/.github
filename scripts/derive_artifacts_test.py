@@ -35,6 +35,7 @@ SERVER = {
                 # Neither required nor secret, not MCP_READ_ONLY: excluded from the plugin bundle.
                 {"name": "THING_READ_ONLY", "description": "alias", "isRequired": False, "isSecret": False},
                 {"name": "MCP_READ_ONLY", "description": "lock", "isRequired": False, "isSecret": False},
+                # Optional secret, but HTTP-bind only: excluded from the plugin bundle (kept by Gemini).
                 {"name": "THING_HTTP_BEARER_TOKEN", "description": "bearer", "isRequired": False, "isSecret": True},
             ],
         }
@@ -81,7 +82,8 @@ def main() -> int:
         }, gemini
 
         # plugin.json: metadata + one userConfig option per surfaced env var (required
-        # or secret, plus MCP_READ_ONLY). THING_READ_ONLY is neither, so it is excluded.
+        # or secret, plus MCP_READ_ONLY). THING_READ_ONLY is neither; THING_HTTP_BEARER_TOKEN
+        # is an HTTP-bind-only secret. Both are excluded from the plugin bundle.
         plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         assert plugin["name"] == "mcp-thing", plugin
         assert plugin["displayName"] == "Thing", plugin
@@ -93,8 +95,8 @@ def main() -> int:
             "thing_token",
             "thing_url",
             "mcp_read_only",
-            "thing_http_bearer_token",
         }, plugin
+        assert "thing_http_bearer_token" not in plugin["userConfig"], plugin
         assert plugin["userConfig"]["thing_token"] == {
             "type": "string",
             "title": "THING_TOKEN",
@@ -116,8 +118,8 @@ def main() -> int:
             "THING_TOKEN": "${user_config.thing_token}",
             "THING_URL": "${user_config.thing_url}",
             "MCP_READ_ONLY": "${user_config.mcp_read_only}",
-            "THING_HTTP_BEARER_TOKEN": "${user_config.thing_http_bearer_token}",
         }, srv
+        assert "THING_HTTP_BEARER_TOKEN" not in srv["env"], srv
 
         # The Python floor was rewritten from requires-python in llms-full.txt (and so
         # in the derived prefix), not left at the stale >=3.10.

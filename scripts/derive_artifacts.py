@@ -16,9 +16,11 @@ release bumps only the sources and runs this script.
   ``userConfig`` prompt per surfaced environment variable (``sensitive`` on the
   secrets); ``.mcp.json`` launches ``uvx <identifier>@<version>`` and maps each
   var to its ``${user_config.<key>}`` reference. "Surfaced" means required or
-  secret, plus ``MCP_READ_ONLY`` as an optional toggle -- the same set in both
-  files, so every ``${user_config.KEY}`` the server config references is a
-  declared ``userConfig`` option (which ``claude plugin validate`` requires).
+  secret, plus ``MCP_READ_ONLY``, minus any ``*_HTTP_BEARER_TOKEN`` (HTTP-bind
+  only; irrelevant to a stdio launch) -- see ``_plugin_env_vars`` for why every
+  kept var is safe left blank. The same set backs both files, so every
+  ``${user_config.KEY}`` the server config references is a declared ``userConfig``
+  option (which ``claude plugin validate`` requires).
 - ``llms.txt``: the byte-exact prefix of ``llms-full.txt`` up to the first
   section that only the full document carries. The heading that marks that cut
   differs per server (``## Configuration``, ``## Environment Variables``,
@@ -75,12 +77,21 @@ def derive_gemini_extension() -> str:
 
 def _plugin_env_vars(pkg: dict) -> list[dict]:
     """Environment variables surfaced to the Claude Code plugin: required or secret,
-    plus MCP_READ_ONLY as an optional toggle. The same set backs plugin.json's
-    userConfig and .mcp.json's env, so no env reference is left undeclared."""
+    plus MCP_READ_ONLY as an optional toggle, minus any ``*_HTTP_BEARER_TOKEN``.
+
+    The bearer tokens guard a non-loopback HTTP bind; the plugin launches the server over
+    stdio (``uvx``), where that code path is never reached, so they are dead weight in the
+    prompt. Everything kept is safe when left blank: Claude Code substitutes an unset
+    optional option as an empty string (verified against the CLI), and every server reads
+    these via ``os.getenv(...)`` with a falsy/``or`` fallback, so empty reads as "not set"
+    -- an empty token yields no auth header, and an empty MCP_READ_ONLY does not lock
+    (``_FALSEY`` includes ``""``). The same set backs plugin.json's userConfig and
+    .mcp.json's env, so no ``${user_config.KEY}`` reference is left undeclared."""
     return [
         env
         for env in pkg["environmentVariables"]
-        if env["isRequired"] or env["isSecret"] or env["name"] == "MCP_READ_ONLY"
+        if (env["isRequired"] or env["isSecret"] or env["name"] == "MCP_READ_ONLY")
+        and not env["name"].endswith("_HTTP_BEARER_TOKEN")
     ]
 
 
