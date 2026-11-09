@@ -35,6 +35,11 @@ jobs:
       - run: scripts/fleet-update.sh --self-test
       - run: scripts/pin_install_snippets.sh --self-test
       - run: python3 scripts/derive_artifacts_test.py
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Lint workflows with zizmor
+        # Same pinned zizmor as the reusable lint.yml runs on the servers, here over this repo's
+        # real reusable workflows. --min-severity medium is the gate.
+        run: uvx zizmor==1.32.0 --min-severity medium .github/workflows
 
   # Copier template: render each committed answer set, diff against the committed golden tree,
   # and actionlint the rendered stubs. template/ is out of this repo's own actionlint/Dependabot

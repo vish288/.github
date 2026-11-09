@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""Derive the two release-tracked artifacts from their sources.
+"""Derive the release-tracked artifacts from their sources.
 
-Both files stay committed on purpose: the Gemini CLI installs
-``gemini-extension.json`` straight from the repo and ``llms.txt`` is fetched
-from ``main``. Hand-maintaining them let their versions drift from
-``server.json``; instead a release bumps only the sources and runs this script.
+All stay committed on purpose: the Gemini CLI installs ``gemini-extension.json``
+straight from the repo, Claude Code reads ``.claude-plugin/plugin.json`` and
+``.mcp.json`` from a cloned plugin, and ``llms.txt`` is fetched from ``main``.
+Hand-maintaining them let their versions drift from ``server.json``; instead a
+release bumps only the sources and runs this script.
 
 - ``gemini-extension.json``: derived entirely from ``server.json`` -- ``name`` and
   ``version`` from the package identifier and version, ``description`` from the
   registry description, ``settings`` from ``environmentVariables`` under Gemini's
   field names (``required``/``sensitive``).
+- ``.claude-plugin/plugin.json`` + ``.mcp.json``: the Claude Code plugin bundle,
+  also from ``server.json``. ``plugin.json`` carries the metadata and a
+  ``userConfig`` prompt per surfaced environment variable (``sensitive`` on the
+  secrets); ``.mcp.json`` launches ``uvx <identifier>@<version>`` and maps each
+  var to its ``${user_config.<key>}`` reference. "Surfaced" means required or
+  secret, plus ``MCP_READ_ONLY`` as an optional toggle -- the same set in both
+  files, so every ``${user_config.KEY}`` the server config references is a
+  declared ``userConfig`` option (which ``claude plugin validate`` requires).
 - ``llms.txt``: the byte-exact prefix of ``llms-full.txt`` up to the first
   section that only the full document carries. The heading that marks that cut
   differs per server (``## Configuration``, ``## Environment Variables``,
@@ -64,6 +73,67 @@ def derive_gemini_extension() -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
+def _plugin_env_vars(pkg: dict) -> list[dict]:
+    """Environment variables surfaced to the Claude Code plugin: required or secret,
+    plus MCP_READ_ONLY as an optional toggle. The same set backs plugin.json's
+    userConfig and .mcp.json's env, so no env reference is left undeclared."""
+    return [
+        env
+        for env in pkg["environmentVariables"]
+        if env["isRequired"] or env["isSecret"] or env["name"] == "MCP_READ_ONLY"
+    ]
+
+
+def derive_plugin_json() -> str:
+    """.claude-plugin/plugin.json from server.json. homepage must parse as a URL
+    (Claude Code refuses the plugin otherwise), so it falls back to the repository
+    URL when websiteUrl is absent."""
+    server = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
+    pkg = server["packages"][0]
+    identifier = pkg["identifier"]
+    data = {
+        "name": identifier,
+        "displayName": server.get("title") or identifier,
+        "version": server["version"],
+        "description": server["description"],
+        "author": {"name": "vish288"},
+        "homepage": server.get("websiteUrl") or server["repository"]["url"],
+        "repository": server["repository"]["url"],
+        "license": "MIT",
+        "userConfig": {
+            env["name"].lower(): {
+                "type": "string",
+                "title": env["name"],
+                "description": env["description"],
+                "required": env["isRequired"],
+                "sensitive": env["isSecret"],
+            }
+            for env in _plugin_env_vars(pkg)
+        },
+    }
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def derive_mcp_json() -> str:
+    """.mcp.json from server.json: launch uvx with the pinned identifier and map each
+    surfaced env var to its ${user_config.<key>} reference. The server key drops the
+    mcp- prefix so Claude Code lists it as plugin:<identifier>:<short>."""
+    server = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
+    pkg = server["packages"][0]
+    identifier = pkg["identifier"]
+    short = identifier.removeprefix("mcp-") or identifier
+    data = {
+        "mcpServers": {
+            short: {
+                "command": "uvx",
+                "args": [f"{identifier}@{server['version']}"],
+                "env": {env["name"]: f"${{user_config.{env['name'].lower()}}}" for env in _plugin_env_vars(pkg)},
+            }
+        }
+    }
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
 def rewrite_python_floor() -> None:
     """Rewrite the ``- **Python**: >=X.Y`` line in llms-full.txt from pyproject's
     ``requires-python`` so llms.txt (its prefix) cannot drift from the real floor.
@@ -96,6 +166,10 @@ def derive_llms_txt() -> str:
 
 def main() -> int:
     (ROOT / "gemini-extension.json").write_text(derive_gemini_extension(), encoding="utf-8")
+    plugin_dir = ROOT / ".claude-plugin"
+    plugin_dir.mkdir(exist_ok=True)
+    (plugin_dir / "plugin.json").write_text(derive_plugin_json(), encoding="utf-8")
+    (ROOT / ".mcp.json").write_text(derive_mcp_json(), encoding="utf-8")
     rewrite_python_floor()
     (ROOT / "llms.txt").write_text(derive_llms_txt(), encoding="utf-8")
     return 0

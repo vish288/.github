@@ -45,6 +45,12 @@ on:
         description: "PAT with the ruleset Admin bypass; moves main and the tag, dispatches publish.yml"
         required: true
 
+# Default for the test/lint reusable-call jobs, which only read the tree; the release job below
+# grants itself the writes it needs. Without this, those two jobs run with the repo's default
+# token scope (zizmor excessive-permissions).
+permissions:
+  contents: read
+
 jobs:
   # $/ resolves to THIS repo at THIS workflow's commit. A local ./ path would resolve against
   # the calling server's checkout (wrong repo), and a reusable `uses:` cannot take an expression
@@ -268,6 +274,8 @@ jobs:
           LLMS_FULL_BLOB=$(create_blob llms-full.txt)
           SERVER_JSON_BLOB=$(create_blob server.json)
           GEMINI_EXT_BLOB=$(create_blob gemini-extension.json)
+          PLUGIN_JSON_BLOB=$(create_blob .claude-plugin/plugin.json)
+          MCP_JSON_BLOB=$(create_blob .mcp.json)
 
           NEW_TREE=$(gh api "repos/$GITHUB_REPOSITORY/git/trees" \
             -X POST \
@@ -282,7 +290,9 @@ jobs:
               { "path": "llms.txt",               "mode": "100644", "type": "blob", "sha": "$LLMS_BLOB" },
               { "path": "llms-full.txt",          "mode": "100644", "type": "blob", "sha": "$LLMS_FULL_BLOB" },
               { "path": "server.json",            "mode": "100644", "type": "blob", "sha": "$SERVER_JSON_BLOB" },
-              { "path": "gemini-extension.json",  "mode": "100644", "type": "blob", "sha": "$GEMINI_EXT_BLOB" }
+              { "path": "gemini-extension.json",  "mode": "100644", "type": "blob", "sha": "$GEMINI_EXT_BLOB" },
+              { "path": ".claude-plugin/plugin.json", "mode": "100644", "type": "blob", "sha": "$PLUGIN_JSON_BLOB" },
+              { "path": ".mcp.json",              "mode": "100644", "type": "blob", "sha": "$MCP_JSON_BLOB" }
             ]
           }
           EOF

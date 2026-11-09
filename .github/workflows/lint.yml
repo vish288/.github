@@ -38,6 +38,10 @@ jobs:
         # (registry record $schema, verified 2026-11-09). Bump this URL when the registry
         # moves to a newer schema.
         run: uvx check-jsonschema==0.39.0 --schemafile https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json server.json
+      - name: Lint workflows with zizmor
+        # Static analysis of the server's workflow stubs. --min-severity medium is the gate; the
+        # version is pinned so a zizmor release can't turn a warning into a red build unannounced.
+        run: uvx zizmor==1.32.0 --min-severity medium .github/workflows
       - name: Guard job.workflow_sha
         env:
           WF_SHA: ${{ job.workflow_sha }}
@@ -55,8 +59,8 @@ jobs:
           LLMS_SPLIT_MARKER: ${{ inputs.llms_split_marker }}
         run: |
           python3 .ci/scripts/derive_artifacts.py
-          git diff --exit-code llms.txt gemini-extension.json \
-            || { echo "::error::llms.txt / gemini-extension.json are stale; the release pipeline derives them from server.json and llms-full.txt"; exit 1; }
+          git diff --exit-code llms.txt gemini-extension.json .claude-plugin/plugin.json .mcp.json \
+            || { echo "::error::a derived artifact (llms.txt, gemini-extension.json, .claude-plugin/plugin.json, .mcp.json) is stale; the release pipeline derives them from server.json and llms-full.txt"; exit 1; }
       # Advisory only: warn when the Copier template pin (.copier-answers _commit) is behind the
       # latest vish288/.github semver tag. Copier owns the stub pins; this never fails the build.
       - name: Template drift (advisory)

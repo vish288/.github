@@ -75,7 +75,10 @@ EOF
   mkdir "$d/srv"
   printf '{"packages":[{"identifier":"mcp-gitlab"}]}' > "$d/srv/server.json"
   printf 'uvx mcp-gitlab@0.1.0\n' > "$d/srv/README.md"
-  if (cd "$d/srv" && bash "$self" 1.2.3) && grep -q 'mcp-gitlab@1.2.3' "$d/srv/README.md"; then
+  printf '{"mcpServers":{"gitlab":{"args":["mcp-gitlab@0.1.0"]}}}\n' > "$d/srv/.mcp.json"
+  if (cd "$d/srv" && bash "$self" 1.2.3) \
+    && grep -q 'mcp-gitlab@1.2.3' "$d/srv/README.md" \
+    && grep -q '"mcp-gitlab@1.2.3"' "$d/srv/.mcp.json"; then
     echo "ok   pin_install_snippets main"
   else
     echo "FAIL pin_install_snippets main"; fail=1
@@ -91,7 +94,9 @@ main() {
   local pkg
   pkg=$(jq -r '.packages[0].identifier' server.json)
   [ -n "$pkg" ] && [ "$pkg" != null ] || { echo "::error::could not read packages[0].identifier from server.json" >&2; exit 1; }
-  pin "$pkg" "$version" README.md llms-full.txt
+  # .mcp.json carries the same "<pkg>@X.Y.Z" launch arg (derive_artifacts.py also regenerates it
+  # from server.json later in the release); pinning it here keeps one script over every snippet file.
+  pin "$pkg" "$version" README.md llms-full.txt .mcp.json
 }
 
 main "$@"

@@ -29,7 +29,8 @@ real workflows here.
 | `scripts/ci/state.sh` | publish-state engine (PyPI / GitHub release / MCP registry) and write paths |
 | `scripts/ci/retry.sh` | transient-vs-permanent retry wrapper used by state/reconcile |
 | `scripts/ci/reconcile.sh` | scans the last 3 tags and dispatches publish for any not fully released |
-| `scripts/derive_artifacts.py` | derives `gemini-extension.json` and `llms.txt` from `server.json` / `llms-full.txt` |
+| `scripts/derive_artifacts.py` | derives `gemini-extension.json`, `.claude-plugin/plugin.json`, `.mcp.json` and `llms.txt` from `server.json` / `llms-full.txt` |
+| `.claude-plugin/marketplace.json` | Claude Code plugin marketplace `vish288-mcp` listing the four servers by `github` source; added with `claude plugin marketplace add vish288/.github`. Hand-maintained (one entry per server), outside `template/` so it never fans out |
 
 ### Scripts are location-independent
 
@@ -50,10 +51,11 @@ Install snippets pin the released version (`uvx mcp-x@X.Y.Z`) so a copied comman
 version the docs describe:
 
 - `derive_artifacts.py` emits `uvx` args as `f"{identifier}@{version}"`, so
-  `gemini-extension.json` carries `args: ["mcp-x@X.Y.Z"]`.
+  `gemini-extension.json` and `.mcp.json` carry `args: ["mcp-x@X.Y.Z"]`.
 - `release.yml` (the "Pin uvx install snippets" step) runs `scripts/pin_install_snippets.sh`,
-  which rewrites `<pkg>[extras]@X.Y.Z` in `README.md` and `llms-full.txt` to the new version and
-  adds both files to the verified release commit tree. It anchors on **this server's own package
+  which rewrites `<pkg>[extras]@X.Y.Z` in `README.md`, `llms-full.txt` and `.mcp.json` to the new
+  version (the derive step regenerates `.mcp.json` from `server.json` afterwards too) and adds the
+  files to the verified release commit tree. It anchors on **this server's own package
   identifier** (`server.json` `packages[0].identifier`) with a strict `X.Y.Z` version, so: another
   tool's pin (`uvx ruff@0.6.9`) is never touched; trailing punctuation (`…@0.21.3.`) survives;
   extras (`mcp-x[http]@…`), JSON args (`"mcp-x@…"`) and `uvx --from mcp-x@…` are all covered; and a

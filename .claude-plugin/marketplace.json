@@ -1,0 +1,29 @@
+{
+  "name": "vish288-mcp",
+  "description": "MCP servers by vish288, installable as Claude Code plugins: GitLab, Argo CD, Coda, Atlassian",
+  "owner": {
+    "name": "vish288"
+  },
+  "plugins": [
+    {
+      "name": "mcp-gitlab",
+      "source": { "source": "github", "repo": "vish288/mcp-gitlab" },
+      "description": "GitLab MCP server: projects, merge requests, pipelines, CI/CD, issues; writes or read-only"
+    },
+    {
+      "name": "mcp-argocd",
+      "source": { "source": "github", "repo": "vish288/mcp-argocd" },
+      "description": "Argo CD MCP server: status, sync, rollback, drift, AppSets; writes or read-only"
+    },
+    {
+      "name": "mcp-coda",
+      "source": { "source": "github", "repo": "vish288/mcp-coda" },
+      "description": "Coda MCP server: docs, pages, tables, rows, formulas, automations; writes or read-only"
+    },
+    {
+      "name": "mcp-atlassian-extended",
+      "source": { "source": "github", "repo": "vish288/mcp-atlassian-extended" },
+      "description": "Atlassian MCP server for Jira and Confluence; writes or read-only"
+    }
+  ]
+}

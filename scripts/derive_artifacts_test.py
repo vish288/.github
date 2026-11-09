@@ -20,19 +20,22 @@ SCRIPT = Path(__file__).resolve().parent / "derive_artifacts.py"
 
 SERVER = {
     "name": "io.github.example/thing",
+    "title": "Thing",
     "description": "Example server",
     "version": "1.2.3",
+    "repository": {"url": "https://github.com/example/thing", "source": "github"},
+    "websiteUrl": "https://example.com/thing",
     "packages": [
         {
             "identifier": "mcp-thing",
             "version": "1.2.3",
             "environmentVariables": [
-                {
-                    "name": "THING_TOKEN",
-                    "description": "API token",
-                    "isRequired": True,
-                    "isSecret": True,
-                }
+                {"name": "THING_TOKEN", "description": "API token", "isRequired": True, "isSecret": True},
+                {"name": "THING_URL", "description": "Base URL", "isRequired": True, "isSecret": False},
+                # Neither required nor secret, not MCP_READ_ONLY: excluded from the plugin bundle.
+                {"name": "THING_READ_ONLY", "description": "alias", "isRequired": False, "isSecret": False},
+                {"name": "MCP_READ_ONLY", "description": "lock", "isRequired": False, "isSecret": False},
+                {"name": "THING_HTTP_BEARER_TOKEN", "description": "bearer", "isRequired": False, "isSecret": True},
             ],
         }
     ],
@@ -63,14 +66,58 @@ def main() -> int:
         assert gemini["name"] == "mcp-thing", gemini
         assert gemini["version"] == "1.2.3", gemini
         assert gemini["mcpServers"]["mcp-thing"] == {"command": "uvx", "args": ["mcp-thing@1.2.3"]}
-        assert gemini["settings"] == [
-            {
-                "name": "THING_TOKEN",
-                "description": "API token",
-                "required": True,
-                "sensitive": True,
-            }
+        assert [s["name"] for s in gemini["settings"]] == [
+            "THING_TOKEN",
+            "THING_URL",
+            "THING_READ_ONLY",
+            "MCP_READ_ONLY",
+            "THING_HTTP_BEARER_TOKEN",
         ], gemini
+        assert gemini["settings"][0] == {
+            "name": "THING_TOKEN",
+            "description": "API token",
+            "required": True,
+            "sensitive": True,
+        }, gemini
+
+        # plugin.json: metadata + one userConfig option per surfaced env var (required
+        # or secret, plus MCP_READ_ONLY). THING_READ_ONLY is neither, so it is excluded.
+        plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        assert plugin["name"] == "mcp-thing", plugin
+        assert plugin["displayName"] == "Thing", plugin
+        assert plugin["version"] == "1.2.3", plugin
+        assert plugin["homepage"] == "https://example.com/thing", plugin
+        assert plugin["repository"] == "https://github.com/example/thing", plugin
+        assert plugin["license"] == "MIT", plugin
+        assert set(plugin["userConfig"]) == {
+            "thing_token",
+            "thing_url",
+            "mcp_read_only",
+            "thing_http_bearer_token",
+        }, plugin
+        assert plugin["userConfig"]["thing_token"] == {
+            "type": "string",
+            "title": "THING_TOKEN",
+            "description": "API token",
+            "required": True,
+            "sensitive": True,
+        }, plugin
+        assert plugin["userConfig"]["thing_url"]["required"] is True
+        assert plugin["userConfig"]["thing_url"]["sensitive"] is False
+
+        # .mcp.json: uvx launch pinned to the version, env mapped to ${user_config.<key>},
+        # server key dropping the mcp- prefix (-> plugin:mcp-thing:thing in Claude Code).
+        mcp = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+        assert set(mcp["mcpServers"]) == {"thing"}, mcp
+        srv = mcp["mcpServers"]["thing"]
+        assert srv["command"] == "uvx", srv
+        assert srv["args"] == ["mcp-thing@1.2.3"], srv
+        assert srv["env"] == {
+            "THING_TOKEN": "${user_config.thing_token}",
+            "THING_URL": "${user_config.thing_url}",
+            "MCP_READ_ONLY": "${user_config.mcp_read_only}",
+            "THING_HTTP_BEARER_TOKEN": "${user_config.thing_http_bearer_token}",
+        }, srv
 
         # The Python floor was rewritten from requires-python in llms-full.txt (and so
         # in the derived prefix), not left at the stale >=3.10.
