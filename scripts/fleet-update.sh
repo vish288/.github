@@ -340,21 +340,27 @@ self_test() {
   ! range_all_signed "$tmp/repo" && echo "  ok   range refuses a dirty tree" || { echo "  FAIL range accepted dirty tree"; fail=1; }
   rm -f "$tmp/repo/dirty.txt"
 
-  # regen_artifacts: derive_artifacts.py (resolved via SCRIPT_DIR) must rewrite llms.txt +
-  # gemini-extension.json with the version-pinned uvx args, and `git add -A` must stage them. The
-  # cut marker is set directly here so the test needs no uv/network; read_marker is checked below
-  # when uv is available, and exercised live during fan-out.
+  # regen_artifacts: derive_artifacts.py (resolved via SCRIPT_DIR) must rewrite llms.txt,
+  # gemini-extension.json, .claude-plugin/plugin.json and .mcp.json with the version-pinned uvx
+  # args, and `git add -A` must stage them all — including .claude-plugin/, newly created in a
+  # server that has none yet. The fixture server.json carries `repository` because plugin.json's
+  # homepage falls back to it (a real server.json always has it; the release/fan-out never feed a
+  # minimal one). The cut marker is set directly here so the test needs no uv/network; read_marker
+  # is checked below when uv is available, and exercised live during fan-out.
   git -C "$tmp/repo" switch -q -c regen origin/main
   ( set -e
     cd "$tmp/repo"
-    printf '{ "name": "io.github.x/thing", "description": "d", "version": "9.9.9", "packages": [ { "identifier": "mcp-thing", "version": "9.9.9", "environmentVariables": [] } ] }\n' > server.json
+    printf '{ "name": "io.github.x/thing", "description": "d", "version": "9.9.9", "repository": { "url": "https://github.com/x/thing", "source": "github" }, "packages": [ { "identifier": "mcp-thing", "version": "9.9.9", "environmentVariables": [] } ] }\n' > server.json
     printf '# Thing\n\nIntro.\n\n## Configuration\n\nfull only\n' > llms-full.txt
     env LLMS_SPLIT_MARKER=$'\n## Configuration' python3 "$SCRIPT_DIR/derive_artifacts.py"
     git add -A
   ) >/dev/null 2>&1 \
     && grep -q '"mcp-thing@9.9.9"' "$tmp/repo/gemini-extension.json" 2>/dev/null \
+    && grep -q '"mcp-thing@9.9.9"' "$tmp/repo/.mcp.json" 2>/dev/null \
     && git -C "$tmp/repo" diff --cached --name-only | grep -qx gemini-extension.json \
     && git -C "$tmp/repo" diff --cached --name-only | grep -qx llms.txt \
+    && git -C "$tmp/repo" diff --cached --name-only | grep -qx '.claude-plugin/plugin.json' \
+    && git -C "$tmp/repo" diff --cached --name-only | grep -qx '.mcp.json' \
     && echo "  ok   regen_artifacts derives version-pinned artifacts and stages them" \
     || { echo "  FAIL regen_artifacts"; fail=1; }
 
