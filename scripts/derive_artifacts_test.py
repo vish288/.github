@@ -35,8 +35,9 @@ SERVER = {
                 # Neither required nor secret, not MCP_READ_ONLY: excluded from the plugin bundle.
                 {"name": "THING_READ_ONLY", "description": "alias", "isRequired": False, "isSecret": False},
                 {"name": "MCP_READ_ONLY", "description": "lock", "isRequired": False, "isSecret": False},
-                # Optional secret, but HTTP-bind only: excluded from the plugin bundle (kept by Gemini).
+                # Two HTTP-transport-only secrets: excluded from the plugin bundle (kept by Gemini).
                 {"name": "THING_HTTP_BEARER_TOKEN", "description": "bearer", "isRequired": False, "isSecret": True},
+                {"name": "THING_OAUTH_CLIENT_SECRET", "description": "oauth", "isRequired": False, "isSecret": True},
             ],
         }
     ],
@@ -73,6 +74,7 @@ def main() -> int:
             "THING_READ_ONLY",
             "MCP_READ_ONLY",
             "THING_HTTP_BEARER_TOKEN",
+            "THING_OAUTH_CLIENT_SECRET",
         ], gemini
         assert gemini["settings"][0] == {
             "name": "THING_TOKEN",
@@ -83,7 +85,7 @@ def main() -> int:
 
         # plugin.json: metadata + one userConfig option per surfaced env var (required
         # or secret, plus MCP_READ_ONLY). THING_READ_ONLY is neither; THING_HTTP_BEARER_TOKEN
-        # is an HTTP-bind-only secret. Both are excluded from the plugin bundle.
+        # and THING_OAUTH_CLIENT_SECRET are HTTP-transport-only secrets. All three are excluded.
         plugin = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         assert plugin["name"] == "mcp-thing", plugin
         assert plugin["displayName"] == "Thing", plugin
@@ -97,6 +99,7 @@ def main() -> int:
             "mcp_read_only",
         }, plugin
         assert "thing_http_bearer_token" not in plugin["userConfig"], plugin
+        assert "thing_oauth_client_secret" not in plugin["userConfig"], plugin
         assert plugin["userConfig"]["thing_token"] == {
             "type": "string",
             "title": "THING_TOKEN",
@@ -120,6 +123,7 @@ def main() -> int:
             "MCP_READ_ONLY": "${user_config.mcp_read_only}",
         }, srv
         assert "THING_HTTP_BEARER_TOKEN" not in srv["env"], srv
+        assert "THING_OAUTH_CLIENT_SECRET" not in srv["env"], srv
 
         # The Python floor was rewritten from requires-python in llms-full.txt (and so
         # in the derived prefix), not left at the stale >=3.10.
