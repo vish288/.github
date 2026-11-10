@@ -4,6 +4,7 @@
 #   state.sh release   TAG [--wait S] [--require STATE]   -> state=done|draft|missing|mismatch   (exit 2 on mismatch)
 #   state.sh registry  TAG [--wait S] [--require STATE]   -> state=done|missing|inactive          (exit 2 on inactive)
 #   state.sh image-auth TAG                               -> state=done|missing|na   (authenticated; decides the build)
+#   state.sh image-digest TAG                             -> the GHCR manifest digest for VER (empty if absent)
 #   state.sh image      TAG                               -> state=done|unknown|na   (anonymous; feeds `all`)
 #   state.sh all       TAG            -> pypi=.. release=.. registry=.. image=..   exit 0 all done, 2 unfixable, 1 incomplete
 #   state.sh pypi-fetch TAG DIR       download the PyPI files; verify sha256 and trusted-publisher provenance
@@ -55,11 +56,11 @@ classify_image() {   # $1 HTTP code from an anonymous manifest HEAD
     *) echo "::error::ghcr returned HTTP $1" >&2; return 1 ;;
   esac
 }
-classify_image_auth() {   # $1 HTTP code from the packages API, $2 matching tag (empty = not found)
+classify_image_auth() {   # $1 HTTP code from an authenticated GHCR manifest HEAD (000 = no pull token issued)
   case "$1" in
-    200) if [ -n "$2" ]; then echo "done"; else echo "missing"; fi ;;
-    404) echo "missing" ;;
-    *) echo "::error::packages API returned HTTP $1" >&2; return 1 ;;
+    200) echo "done" ;;
+    404|000) echo "missing" ;;   # not pushed yet, or token denied for a never-pushed package: build
+    *) echo "::error::ghcr manifest HEAD returned HTTP $1" >&2; return 1 ;;
   esac
 }
 draft_ids() {   # $1 releases JSON array, $2 tag -> ids of draft releases for the tag, newest id first (one per line)
@@ -98,26 +99,42 @@ image_pkg() {   # prints "<owner>/<package>" from the oci identifier, or empty w
   jq -r '.packages[]? | select(.registryType=="oci") | .identifier' server.json 2>/dev/null \
     | head -1 | sed 's/:[^:/]*$//' | sed 's#^ghcr\.io/##'
 }
-state_image_auth() {   # authenticated; used only inside the logged-in image job
-  local pkg name code tags token
-  pkg=$(image_pkg)
-  [ -n "$pkg" ] || { echo na; return 0; }
-  [ -f Dockerfile ] || { echo na; return 0; }
-  name=${pkg##*/}
-  token=${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}
-  code=$("${CURL[@]}" -o /tmp/pkggen.json -w '%{http_code}' \
+image_repo() {   # the GHCR repository "<owner>/<name>": the oci identifier if present, else GITHUB_REPOSITORY
+  local pkg; pkg=$(image_pkg); echo "${pkg:-$GITHUB_REPOSITORY}"
+}
+ghcr_head() {   # <owner>/<name> VER -> echoes "<code> <digest>"; code 000 when no pull token is issued
+  local repo=$1 ver=$2 token hdr code digest
+  token=$("${CURL[@]}" -u "${GITHUB_ACTOR:-}:${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}" \
+    "https://ghcr.io/token?service=ghcr.io&scope=repository:$repo:pull" | jq -r '.token // empty')
+  [ -n "$token" ] || { echo "000 "; return 0; }   # token server grants an empty-access token for a
+  # never-pushed/denied package (distribution token spec); with no usable token, treat it as missing
+  # and let build-push's own push decide loudly.
+  hdr=$(mktemp)
+  code=$("${CURL[@]}" -I -o /dev/null -D "$hdr" -w '%{http_code}' \
     -H "Authorization: Bearer $token" \
-    "https://api.github.com/user/packages/container/$name/versions?per_page=100") || true
-  tags=""
-  [ "$code" = 200 ] && tags=$(jq -r --arg t "$VER" '[.[] | .metadata.container.tags[]? | select(.==$t)] | first // empty' /tmp/pkggen.json)
-  classify_image_auth "$code" "$tags"
+    -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+    "https://ghcr.io/v2/$repo/manifests/$ver") || true
+  digest=$(grep -i '^docker-content-digest:' "$hdr" | tr -d '\r' | awk '{print $2}')
+  rm -f "$hdr"
+  echo "$code ${digest:-}"
+}
+state_image_auth() {   # authenticated; used only inside the logged-in image job. Decides the build.
+  # Build whenever a root Dockerfile exists: an image-only first release has no oci entry yet, so the
+  # package comes from the oci identifier when present, else from GITHUB_REPOSITORY. na only without one.
+  local res
+  [ -f Dockerfile ] || { echo na; return 0; }
+  res=$(ghcr_head "$(image_repo)" "$VER")
+  classify_image_auth "${res%% *}"
+}
+cmd_image_digest() {   # the manifest digest for VER (empty when the image is not present)
+  local res; res=$(ghcr_head "$(image_repo)" "$VER"); echo "${res#* }"
 }
 state_image() {   # anonymous; done only when the image is publicly pullable
   local ref pkg token code
   ref=$(jq -r '.packages[]? | select(.registryType=="oci") | .identifier' server.json 2>/dev/null | head -1)
   [ -n "$ref" ] || { echo na; return 0; }
   pkg=${ref%%:*}; pkg=${pkg#ghcr.io/}
-  token=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:$pkg:pull" | jq -r '.token // empty')
+  token=$("${CURL[@]}" "https://ghcr.io/token?service=ghcr.io&scope=repository:$pkg:pull" | jq -r '.token // empty')
   [ -n "$token" ] || { echo unknown; return 0; }
   code=$("${CURL[@]}" -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
     -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
@@ -222,7 +239,7 @@ cmd_all() {
 }
 
 self_test() {
-  local bad=0 rel drafts stub body n got rc
+  local bad=0 rel drafts stub body n got rc gstub wd
   t() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got '$3' want '$2'"; bad=1; fi; }
   t pypi-done     "done"   "$(classify_pypi '{"urls":[{"packagetype":"bdist_wheel"},{"packagetype":"sdist"}]}')"
   t pypi-partial  partial  "$(classify_pypi '{"urls":[{"packagetype":"sdist"}]}')"
@@ -240,9 +257,11 @@ self_test() {
   t img-public    "done"    "$(classify_image 200)"
   t img-private   "unknown" "$(classify_image 403)"
   t img-missing   "unknown" "$(classify_image 404)"
-  t imgauth-tag   "done"    "$(classify_image_auth 200 0.9.0)"
-  t imgauth-notag "missing" "$(classify_image_auth 200 '')"
-  t imgauth-404   "missing" "$(classify_image_auth 404 '')"
+  t imgauth-200    "done"    "$(classify_image_auth 200)"
+  t imgauth-404    "missing" "$(classify_image_auth 404)"
+  t imgauth-denied "missing" "$(classify_image_auth 000)"
+  got=$(classify_image_auth 500 2>/dev/null) && rc=0 || rc=$?
+  t imgauth-error "1" "$rc"
   # draft lookup for release-create idempotency: 0 (create→immediate lookup miss), 1 (reuse), >1 (cleanup)
   drafts='[{"tag_name":"v2.0.0","draft":true,"id":11},{"tag_name":"v2.0.0","draft":true,"id":9},
            {"tag_name":"v2.0.0","draft":false,"id":5},{"tag_name":"v2.0.1","draft":true,"id":8}]'
@@ -278,6 +297,30 @@ STUB
   stub_error() { echo error; }
   got=$( export PATH="$stub:$PATH"; poll stub_error 0 "done" ) && rc=0 || rc=$?
   t poll-timeout "state=error 1" "$got $rc"
+  # state_image_auth: a Dockerfile decides na; WITH a Dockerfile it probes GHCR even when server.json
+  # has no oci entry (image-only first release). Stub curl: token req -> a token, manifest HEAD -> GHCR_CODE.
+  gstub=$(mktemp -d); wd=$(mktemp -d)
+  cat > "$gstub/curl" <<'STUB'
+#!/usr/bin/env bash
+url=; dd=; prev=
+for a in "$@"; do url=$a; [ "$prev" = -D ] && dd=$a; prev=$a; done
+case "$url" in
+  *ghcr.io/token*) echo '{"token":"stub"}' ;;
+  *ghcr.io/v2/*manifests*) [ -n "$dd" ] && printf 'Docker-Content-Digest: sha256:deadbeef\r\n' > "$dd"; echo "${GHCR_CODE:-200}" ;;
+esac
+STUB
+  chmod +x "$gstub/curl"
+  echo '{"name":"x","packages":[{"registryType":"pypi","identifier":"s"}]}' > "$wd/server.json"
+  got=$( cd "$wd"; export PATH="$gstub:$PATH" VER=1 GITHUB_REPOSITORY=o/n GITHUB_ACTOR=a GH_TOKEN=t; state_image_auth )
+  t imgauth-na-no-dockerfile na "$got"
+  : > "$wd/Dockerfile"
+  got=$( cd "$wd"; export PATH="$gstub:$PATH" GHCR_CODE=404 VER=1 GITHUB_REPOSITORY=o/n GITHUB_ACTOR=a GH_TOKEN=t; state_image_auth )
+  t imgauth-missing-no-oci "missing" "$got"
+  got=$( cd "$wd"; export PATH="$gstub:$PATH" GHCR_CODE=200 VER=1 GITHUB_REPOSITORY=o/n GITHUB_ACTOR=a GH_TOKEN=t; state_image_auth )
+  t imgauth-done-no-oci "done" "$got"
+  got=$( cd "$wd"; export PATH="$gstub:$PATH" VER=1 GITHUB_REPOSITORY=o/n GITHUB_ACTOR=a GH_TOKEN=t; cmd_image_digest )
+  t image-digest "sha256:deadbeef" "$got"
+  rm -rf "$gstub" "$wd"
   rm -rf "$stub"; rm -f "$body" "$n" "$polln"
   exit $bad
 }
@@ -301,6 +344,7 @@ case $CMD in
   release)          poll state_release "$WAIT" "$REQ" ;;
   registry)         poll state_registry "$WAIT" "$REQ" ;;
   image-auth)       state_image_auth ;;
+  image-digest)     cmd_image_digest ;;
   image)            state_image ;;
   all)              cmd_all ;;
   pypi-fetch)       cmd_pypi_fetch "${ARG:?dir}" ;;

@@ -83,7 +83,9 @@ jobs:
           path: .conformance
           persist-credentials: false
       - name: Build conformance suite
-        run: cd .conformance && npm ci && npm run build
+        # --ignore-scripts: the suite is built by `npm run build`, not by install hooks, so
+        # third-party postinstall scripts don't run (verified: build still emits dist/index.js).
+        run: cd .conformance && npm ci --ignore-scripts && npm run build
       - name: Start the server with dummy env
         env:
           SERVICE: ${{ inputs.service }}

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -68,7 +70,10 @@ def _self_test() -> int:
             ),
             encoding="utf-8",
         )
-        (root / ".github" / "conformance-env").write_text("EXTRA=1\n", encoding="utf-8")
+        tricky = "a b$c"  # space + shell metachar: must round-trip through `. file` unchanged
+        (root / ".github" / "conformance-env").write_text(
+            f"EXTRA=1\nTRICKY={tricky}\n", encoding="utf-8"
+        )
         old = os.getcwd()
         os.chdir(root)
         try:
@@ -79,8 +84,21 @@ def _self_test() -> int:
         assert env["GITLAB_TOKEN"] == "x"
         assert env["MCP_READ_ONLY"] == "true"
         assert env["EXTRA"] == "1"
+        assert env["TRICKY"] == tricky
         assert "GITLAB_HTTP_BEARER_TOKEN" not in env
         assert "GITLAB_OAUTH_CLIENT_SECRET" not in env
+        # Render as the CLI does and source it through bash to prove the quoting round-trips.
+        envfile = root / "rendered.env"
+        envfile.write_text(
+            "".join(f"{k}={shlex.quote(v)}\n" for k, v in env.items()), encoding="utf-8"
+        )
+        sourced = subprocess.run(
+            ["bash", "-c", f'set -a; . {shlex.quote(str(envfile))}; set +a; printf %s "$TRICKY"'],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert sourced == tricky, f"round-trip changed value: {sourced!r} != {tricky!r}"
     print("ok   conformance_env")
     return 0
 
@@ -90,7 +108,8 @@ def main() -> int:
         return _self_test()
     env = derive()
     for key in sorted(env):
-        print(f"{key}={env[key]}")
+        # shlex.quote so a value with spaces or shell metacharacters survives `set -a; . file`.
+        print(f"{key}={shlex.quote(env[key])}")
     return 0
 
 

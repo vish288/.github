@@ -134,6 +134,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Image state (authenticated)
         id: state
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
         run: echo "state=$(.ci/scripts/ci/state.sh image-auth "$TAG")" >> "$GITHUB_OUTPUT"
       - name: An oci package needs a Dockerfile
         if: ${{ needs.confirm-pypi.outputs.has_oci == 'true' && steps.state.outputs.state == 'na' }}
@@ -181,12 +183,32 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
             io.modelcontextprotocol.server.name=${{ steps.srv.outputs.name }}
+      # Idempotency: when the image already exists (state == done) we do not rebuild, but we still
+      # ensure it carries a build-provenance attestation. Fetch its manifest digest, verify the
+      # existing attestation, and only re-attest that same digest when verification fails.
+      - name: Existing image digest
+        id: digest
+        if: steps.state.outputs.state == 'done'
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: echo "digest=$(.ci/scripts/ci/state.sh image-digest "$TAG")" >> "$GITHUB_OUTPUT"
+      - name: Verify existing attestation
+        id: verify
+        if: steps.state.outputs.state == 'done'
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          if gh attestation verify "oci://ghcr.io/$GITHUB_REPOSITORY:$VER" -R "$GITHUB_REPOSITORY"; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Attest build provenance
-        if: steps.state.outputs.state == 'missing'
+        if: ${{ steps.state.outputs.state == 'missing' || (steps.state.outputs.state == 'done' && steps.verify.outputs.ok == 'false') }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.state.outputs.state == 'missing' && steps.build.outputs.digest || steps.digest.outputs.digest }}
           push-to-registry: true
 
   registry:
