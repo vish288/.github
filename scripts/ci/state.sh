@@ -59,7 +59,10 @@ classify_image() {   # $1 HTTP code from an anonymous manifest HEAD
 classify_image_auth() {   # $1 HTTP code from an authenticated GHCR manifest HEAD (000 = no pull token issued)
   case "$1" in
     200) echo "done" ;;
-    404|000) echo "missing" ;;   # not pushed yet, or token denied for a never-pushed package: build
+    # 404: not pushed yet. 000: no token issued. 401/403: the token server issued an empty-access
+    # token (distribution token spec) because the package does not exist yet. All mean "build";
+    # the login step already proved the credentials, so a real auth fault still fails at the push.
+    404|000|401|403) echo "missing" ;;
     *) echo "::error::ghcr manifest HEAD returned HTTP $1" >&2; return 1 ;;
   esac
 }
@@ -105,7 +108,9 @@ image_repo() {   # the GHCR repository "<owner>/<name>": the oci identifier if p
 ghcr_head() {   # <owner>/<name> VER -> echoes "<code> <digest>"; code 000 when no pull token is issued
   local repo=$1 ver=$2 token hdr code digest
   token=$("${CURL[@]}" -u "${GITHUB_ACTOR:-}:${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}" \
-    "https://ghcr.io/token?service=ghcr.io&scope=repository:$repo:pull" | jq -r '.token // empty')
+    "https://ghcr.io/token?service=ghcr.io&scope=repository:$repo:pull,push" | jq -r '.token // empty')
+  # pull,push like `docker push`: the job holds packages: write, so a not-yet-pushed name gets a
+  # token with push access and the manifest HEAD answers 404 instead of 401/403.
   [ -n "$token" ] || { echo "000 "; return 0; }   # token server grants an empty-access token for a
   # never-pushed/denied package (distribution token spec); with no usable token, treat it as missing
   # and let build-push's own push decide loudly.
@@ -260,6 +265,8 @@ self_test() {
   t imgauth-200    "done"    "$(classify_image_auth 200)"
   t imgauth-404    "missing" "$(classify_image_auth 404)"
   t imgauth-denied "missing" "$(classify_image_auth 000)"
+  t imgauth-401    "missing" "$(classify_image_auth 401)"
+  t imgauth-403    "missing" "$(classify_image_auth 403)"
   got=$(classify_image_auth 500 2>/dev/null) && rc=0 || rc=$?
   t imgauth-error "1" "$rc"
   # draft lookup for release-create idempotency: 0 (create→immediate lookup miss), 1 (reuse), >1 (cleanup)
