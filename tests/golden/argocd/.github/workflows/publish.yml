@@ -18,7 +18,7 @@ on:
       fail_at:
         description: "Test hook: fail this job on attempt 1, before it writes, when its target is not done"
         type: choice
-        options: [none, pypi, release, registry]
+        options: [none, pypi, release, registry, image]
         default: none
 
 # One run per tag. A duplicate (reconcile or a manual re-dispatch) waits, then finds everything done.
@@ -76,3 +76,5 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      packages: write
+      attestations: write

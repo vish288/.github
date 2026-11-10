@@ -23,7 +23,7 @@ on:
         description: "Test hook forwarded to publish.yml"
         required: false
         type: choice
-        options: [none, pypi, release, registry]
+        options: [none, pypi, release, registry, image]
         default: none
 jobs:
   release:

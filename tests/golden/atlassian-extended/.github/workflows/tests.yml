@@ -8,3 +8,5 @@ jobs:
     uses: vish288/.github/.github/workflows/tests.yml@PIN
     with:
       coverage_min: 95
+      service: mcp-atlassian-extended
+      conformance: true

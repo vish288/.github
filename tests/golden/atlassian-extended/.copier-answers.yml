@@ -1,4 +1,7 @@
 # Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+conformance: true
+conformance_env: []
+conformance_expected_failures: []
 coverage_min: 95
 llms_split_marker: '
 
