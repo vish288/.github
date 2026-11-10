@@ -31,6 +31,18 @@ pin() {
   done
 }
 
+# Pin the GHCR image tag `ghcr.io/<owner>/<repo>:X.Y.Z` in each file (the oci package form).
+pin_image() {
+  local img=$1 version=$2 f tmp
+  shift 2
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    tmp="$f.pintmp.$$"
+    sed -E "s#(${img//./\\.}):[0-9]+\.[0-9]+\.[0-9]+#\1:${version}#g" "$f" > "$tmp"
+    mv "$tmp" "$f"
+  done
+}
+
 _tmpd=""
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 # Must return 0: on a normal end the EXIT trap's status becomes the script's exit code.
@@ -71,13 +83,24 @@ EOF
   else
     echo "FAIL pin_install_snippets"; fail=1
   fi
+  cat > "$d/img.md" <<'EOF'
+docker run --rm ghcr.io/vish288/mcp-gitlab:0.21.3
+EOF
+  printf 'docker run --rm ghcr.io/vish288/mcp-gitlab:9.9.9\n' > "$d/img.expect"
+  pin_image ghcr.io/vish288/mcp-gitlab 9.9.9 "$d/img.md"
+  if diff -u "$d/img.expect" "$d/img.md"; then
+    echo "ok   pin_image"
+  else
+    echo "FAIL pin_image"; fail=1
+  fi
   # The real entry point (as release.yml calls it) must exit 0 and rewrite in place.
   mkdir "$d/srv"
-  printf '{"packages":[{"identifier":"mcp-gitlab"}]}' > "$d/srv/server.json"
-  printf 'uvx mcp-gitlab@0.1.0\n' > "$d/srv/README.md"
+  printf '{"packages":[{"identifier":"mcp-gitlab"},{"registryType":"oci","identifier":"ghcr.io/vish288/mcp-gitlab:0.1.0"}]}' > "$d/srv/server.json"
+  printf 'uvx mcp-gitlab@0.1.0\ndocker run ghcr.io/vish288/mcp-gitlab:0.1.0\n' > "$d/srv/README.md"
   printf '{"mcpServers":{"gitlab":{"args":["mcp-gitlab@0.1.0"]}}}\n' > "$d/srv/.mcp.json"
   if (cd "$d/srv" && bash "$self" 1.2.3) \
     && grep -q 'mcp-gitlab@1.2.3' "$d/srv/README.md" \
+    && grep -q 'ghcr.io/vish288/mcp-gitlab:1.2.3' "$d/srv/README.md" \
     && grep -q '"mcp-gitlab@1.2.3"' "$d/srv/.mcp.json"; then
     echo "ok   pin_install_snippets main"
   else
@@ -97,6 +120,10 @@ main() {
   # .mcp.json carries the same "<pkg>@X.Y.Z" launch arg (derive_artifacts.py also regenerates it
   # from server.json later in the release); pinning it here keeps one script over every snippet file.
   pin "$pkg" "$version" README.md llms-full.txt .mcp.json
+  # The GHCR image tag in README.md, when the server ships an oci package.
+  local img
+  img=$(jq -r '.packages[]? | select(.registryType=="oci") | .identifier' server.json | head -1 | sed 's/:[^:/]*$//')
+  [ -n "$img" ] && [ "$img" != null ] && pin_image "$img" "$version" README.md
 }
 
 main "$@"

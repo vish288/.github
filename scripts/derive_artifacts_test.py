@@ -39,6 +39,15 @@ SERVER = {
                 {"name": "THING_HTTP_BEARER_TOKEN", "description": "bearer", "isRequired": False, "isSecret": True},
                 {"name": "THING_OAUTH_CLIENT_SECRET", "description": "oauth", "isRequired": False, "isSecret": True},
             ],
+        },
+        {
+            # A second package (oci) must not affect the derived artifacts: both
+            # derive_artifacts.py and pin_install_snippets.sh read packages[0] (pypi).
+            "registryType": "oci",
+            "identifier": "ghcr.io/example/mcp-thing:1.2.3",
+            "version": "1.2.3",
+            "transport": {"type": "stdio"},
+            "environmentVariables": [],
         }
     ],
 }

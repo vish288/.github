@@ -1,0 +1,12 @@
+# Conformance scenarios this server does not pass yet. Every entry needs a reason.
+# A baselined entry that PASSES fails the run (stale baseline); prune on each suite bump.
+server:
+  # The suite drives tools that exist only on the conformance reference server.
+  - tools-call-image              # reference server's test_image_content tool
+  - tools-call-audio              # reference server's test_audio_content tool
+  - tools-call-embedded-resource  # reference server's test_embedded_resource tool
+  - tools-call-mixed-content      # reference server's test_multiple_content_types tool
+  - tools-call-with-progress      # reference server's test_tool_with_progress tool
+[% for item in conformance_expected_failures %]
+  - [[ item ]]
+[% endfor %]

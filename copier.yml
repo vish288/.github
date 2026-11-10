@@ -46,3 +46,18 @@ llms_split_marker:
   type: str
   help: "Heading that ends llms.txt within llms-full.txt (passed to derive_artifacts.py)"
   default: "\n## Configuration"
+
+conformance:
+  type: bool
+  help: "Run the MCP conformance suite in CI"
+  default: true
+
+conformance_expected_failures:
+  type: yaml
+  help: "Extra conformance scenarios or <scenario>:<check-id> entries to baseline, each with a reason"
+  default: []
+
+conformance_env:
+  type: yaml
+  help: "Extra NAME=value lines for the conformance server process (override the derived dummy env)"
+  default: []

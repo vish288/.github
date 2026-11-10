@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Publish state of one tag against its three targets, and the write paths that complete it.
+# Publish state of one tag against its targets, and the write paths that complete it.
 #   state.sh pypi      TAG [--wait S] [--require STATE]   -> state=done|partial|missing
-#   state.sh release   TAG [--require STATE]              -> state=done|draft|missing|mismatch   (exit 2 on mismatch)
+#   state.sh release   TAG [--wait S] [--require STATE]   -> state=done|draft|missing|mismatch   (exit 2 on mismatch)
 #   state.sh registry  TAG [--wait S] [--require STATE]   -> state=done|missing|inactive          (exit 2 on inactive)
-#   state.sh all       TAG            -> pypi=.. release=.. registry=..   exit 0 all done, 2 unfixable, 1 incomplete
+#   state.sh image-auth TAG                               -> state=done|missing|na   (authenticated; decides the build)
+#   state.sh image      TAG                               -> state=done|unknown|na   (anonymous; feeds `all`)
+#   state.sh all       TAG            -> pypi=.. release=.. registry=.. image=..   exit 0 all done, 2 unfixable, 1 incomplete
 #   state.sh pypi-fetch TAG DIR       download the PyPI files; verify sha256 and trusted-publisher provenance
 #   state.sh release-create TAG       delete leftover drafts, fetch from PyPI, create a draft by id, upload the files, then publish it (latest only for the highest tag)
 #   state.sh registry-publish TAG     set the version in server.json, validate, login + publish under retry
@@ -46,6 +48,20 @@ classify_registry() {   # $1 HTTP code, $2 body
     *) echo "::error::registry returned HTTP $1" >&2; return 1 ;;
   esac
 }
+classify_image() {   # $1 HTTP code from an anonymous manifest HEAD
+  case "$1" in
+    200) echo "done" ;;
+    401|403|404) echo "unknown" ;;   # missing or private; the authenticated check decides
+    *) echo "::error::ghcr returned HTTP $1" >&2; return 1 ;;
+  esac
+}
+classify_image_auth() {   # $1 HTTP code from the packages API, $2 matching tag (empty = not found)
+  case "$1" in
+    200) if [ -n "$2" ]; then echo "done"; else echo "missing"; fi ;;
+    404) echo "missing" ;;
+    *) echo "::error::packages API returned HTTP $1" >&2; return 1 ;;
+  esac
+}
 draft_ids() {   # $1 releases JSON array, $2 tag -> ids of draft releases for the tag, newest id first (one per line)
   jq -r --arg t "$2" '[.[]|select(.tag_name==$t and .draft)]|sort_by(.id)|reverse|.[].id' <<<"$1"
 }
@@ -78,6 +94,36 @@ state_registry() {
   st=$(classify_registry "$code" "$(cat "$f")") || { rm -f "$f"; return 1; }
   rm -f "$f"; echo "$st"
 }
+image_pkg() {   # prints "<owner>/<package>" from the oci identifier, or empty when none
+  jq -r '.packages[]? | select(.registryType=="oci") | .identifier' server.json 2>/dev/null \
+    | head -1 | sed 's/:[^:/]*$//' | sed 's#^ghcr\.io/##'
+}
+state_image_auth() {   # authenticated; used only inside the logged-in image job
+  local pkg name code tags token
+  pkg=$(image_pkg)
+  [ -n "$pkg" ] || { echo na; return 0; }
+  [ -f Dockerfile ] || { echo na; return 0; }
+  name=${pkg##*/}
+  token=${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}
+  code=$("${CURL[@]}" -o /tmp/pkggen.json -w '%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    "https://api.github.com/user/packages/container/$name/versions?per_page=100") || true
+  tags=""
+  [ "$code" = 200 ] && tags=$(jq -r --arg t "$VER" '[.[] | .metadata.container.tags[]? | select(.==$t)] | first // empty' /tmp/pkggen.json)
+  classify_image_auth "$code" "$tags"
+}
+state_image() {   # anonymous; done only when the image is publicly pullable
+  local ref pkg token code
+  ref=$(jq -r '.packages[]? | select(.registryType=="oci") | .identifier' server.json 2>/dev/null | head -1)
+  [ -n "$ref" ] || { echo na; return 0; }
+  pkg=${ref%%:*}; pkg=${pkg#ghcr.io/}
+  token=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:$pkg:pull" | jq -r '.token // empty')
+  [ -n "$token" ] || { echo unknown; return 0; }
+  code=$("${CURL[@]}" -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+    "https://ghcr.io/v2/$pkg/manifests/$VER") || true
+  classify_image "$code"
+}
 poll() {   # FN WAIT REQUIRE -> prints state=..., exits 1 if REQUIRE unmet, 2 if unfixable
   local fn=$1 req=$3 st deadline=$(( $(date +%s) + $2 ))
   while :; do
@@ -87,10 +133,10 @@ poll() {   # FN WAIT REQUIRE -> prints state=..., exits 1 if REQUIRE unmet, 2 if
   done
   out "state=$st"
   case "$st" in
-    mismatch) echo "::error::published release $TAG lacks a PyPI file. Immutable: CI cannot fix it; ship the next patch version."; exit 2 ;;
-    inactive) echo "::error::registry entry $SERVER@$VER exists but is not active. CI cannot fix it; ship the next patch version."; exit 2 ;;
+    mismatch) echo "::error::published release $TAG lacks a PyPI file. Immutable: CI cannot fix it; ship the next patch version." >&2; exit 2 ;;
+    inactive) echo "::error::registry entry $SERVER@$VER exists but is not active. CI cannot fix it; ship the next patch version." >&2; exit 2 ;;
   esac
-  [ -z "$req" ] || [ "$st" = "$req" ] || { echo "::error::$fn is '$st', expected '$req'"; exit 1; }
+  [ -z "$req" ] || [ "$st" = "$req" ] || { echo "::error::$fn is '$st', expected '$req'" >&2; exit 1; }
 }
 
 # ---- write paths ----
@@ -146,7 +192,13 @@ cmd_release_create() {
     || echo "::warning::publishing draft $id failed; the confirm step decides"
 }
 cmd_registry_publish() {
-  jq --arg v "$VER" '.version=$v | (.packages[]?.version)=$v' server.json > server.json.tmp && mv server.json.tmp server.json
+  # The oci tag lives in the identifier (registry/namespace/repo:tag), so rewrite that suffix
+  # as well as the package version. The release commit is the real fix; this is a backstop.
+  jq --arg v "$VER" '
+    .version=$v
+    | (.packages[]?.version)=$v
+    | (.packages[]? | select(.registryType=="oci") | .identifier) |= sub(":[^:/]*$"; ":" + $v)
+  ' server.json > server.json.tmp && mv server.json.tmp server.json
   mcp-publisher validate
   "$RETRY" bash -c 'mcp-publisher login github-oidc && mcp-publisher publish' \
     || echo "::warning::mcp-publisher publish failed; the confirm step decides"
@@ -158,11 +210,15 @@ cmd_gate() {   # JOB STATE
   fi
 }
 cmd_all() {
-  local p r g
-  p=$(state_pypi) || p=error; r=$(state_release) || r=error; g=$(state_registry) || g=error
-  out "pypi=$p"; out "release=$r"; out "registry=$g"
-  summary "| $TAG | pypi=$p release=$r registry=$g | |"
-  case "$p/$r/$g" in done/done/done) exit 0 ;; *mismatch*|*inactive*) exit 2 ;; *) exit 1 ;; esac
+  local p r g i
+  p=$(state_pypi) || p=error; r=$(state_release) || r=error; g=$(state_registry) || g=error; i=$(state_image) || i=error
+  out "pypi=$p"; out "release=$r"; out "registry=$g"; out "image=$i"
+  summary "| $TAG | pypi=$p release=$r registry=$g image=$i | |"
+  case "$p/$r/$g/$i" in
+    done/done/done/done|done/done/done/na) exit 0 ;;
+    *mismatch*|*inactive*) exit 2 ;;
+    *) exit 1 ;;
+  esac
 }
 
 self_test() {
@@ -181,6 +237,12 @@ self_test() {
   t reg-done      "done"   "$(classify_registry 200 '{"_meta":{"io.modelcontextprotocol.registry/official":{"status":"active"}}}')"
   t reg-inactive  inactive "$(classify_registry 200 '{"_meta":{"io.modelcontextprotocol.registry/official":{"status":"deleted"}}}')"
   t reg-missing   missing  "$(classify_registry 404 '{"status":404,"detail":"Server not found"}')"
+  t img-public    "done"    "$(classify_image 200)"
+  t img-private   "unknown" "$(classify_image 403)"
+  t img-missing   "unknown" "$(classify_image 404)"
+  t imgauth-tag   "done"    "$(classify_image_auth 200 0.9.0)"
+  t imgauth-notag "missing" "$(classify_image_auth 200 '')"
+  t imgauth-404   "missing" "$(classify_image_auth 404 '')"
   # draft lookup for release-create idempotency: 0 (create→immediate lookup miss), 1 (reuse), >1 (cleanup)
   drafts='[{"tag_name":"v2.0.0","draft":true,"id":11},{"tag_name":"v2.0.0","draft":true,"id":9},
            {"tag_name":"v2.0.0","draft":false,"id":5},{"tag_name":"v2.0.1","draft":true,"id":8}]'
@@ -204,11 +266,19 @@ STUB
   chmod +x "$stub/sleep" "$stub/curl"
   echo 0 > "$n"
   got=$( export PATH="$stub:$PATH" CURL_N="$n" CURL_OK_AT=3 PKG=x VER=1; pypi_wait "$body" ) && rc=0 || rc=$?
-  t pypi_wait-propagates "200 0" "$got $rc"                # two 404s then 200 -> success
+  t pypi_wait-propagates "200 0" "$got $rc"
   echo 0 > "$n"
   got=$( export PATH="$stub:$PATH" CURL_N="$n" CURL_OK_AT=99 PYPI_WAIT=0 PKG=x VER=1; pypi_wait "$body" ) && rc=0 || rc=$?
-  t pypi_wait-timeout "404 1" "$got $rc"                   # never propagates within the window -> rc 1
-  rm -rf "$stub"; rm -f "$body" "$n"
+  t pypi_wait-timeout "404 1" "$got $rc"
+  # poll: a stubbed state fn returns error then done; the no-op sleep keeps this fast.
+  polln=$(mktemp); echo 0 > "$polln"
+  stub_poll() { local c; c=$(( $(cat "$polln") + 1 )); echo "$c" > "$polln"; [ "$c" -ge 2 ] && echo "done" || echo error; }
+  got=$( export PATH="$stub:$PATH"; poll stub_poll 30 "done" ) && rc=0 || rc=$?
+  t poll-eventual "state=done 0" "$got $rc"
+  stub_error() { echo error; }
+  got=$( export PATH="$stub:$PATH"; poll stub_error 0 "done" ) && rc=0 || rc=$?
+  t poll-timeout "state=error 1" "$got $rc"
+  rm -rf "$stub"; rm -f "$body" "$n" "$polln"
   exit $bad
 }
 
@@ -228,8 +298,10 @@ while [ $# -gt 0 ]; do
 done
 case $CMD in
   pypi)             poll state_pypi "$WAIT" "$REQ" ;;
-  release)          poll state_release 0 "$REQ" ;;
+  release)          poll state_release "$WAIT" "$REQ" ;;
   registry)         poll state_registry "$WAIT" "$REQ" ;;
+  image-auth)       state_image_auth ;;
+  image)            state_image ;;
   all)              cmd_all ;;
   pypi-fetch)       cmd_pypi_fetch "${ARG:?dir}" ;;
   release-create)   cmd_release_create ;;

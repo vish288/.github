@@ -35,6 +35,18 @@ jobs:
       - run: scripts/fleet-update.sh --self-test
       - run: scripts/pin_install_snippets.sh --self-test
       - run: python3 scripts/derive_artifacts_test.py
+      - run: python3 scripts/ci/conformance_env.py --self-test
+      - name: Validate the oci server.json shapes
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz"
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  /tmp/mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf /tmp/mcp-publisher.tar.gz -C /usr/local/bin mcp-publisher
+          for f in tests/fixtures/server-oci*.json; do
+            d=$(mktemp -d)
+            cp "$f" "$d/server.json"
+            (cd "$d" && mcp-publisher validate)
+          done
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Lint workflows with zizmor
         # Same pinned zizmor as the reusable lint.yml runs on the servers, here over this repo's

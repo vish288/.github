@@ -23,6 +23,8 @@ on:
         value: ${{ jobs.status.outputs.release }}
       registry:
         value: ${{ jobs.status.outputs.registry }}
+      image:
+        value: ${{ jobs.status.outputs.image }}
 
 permissions: {}
 
@@ -40,6 +42,7 @@ jobs:
       pypi: ${{ steps.all.outputs.pypi }}
       release: ${{ steps.all.outputs.release }}
       registry: ${{ steps.all.outputs.registry }}
+      image: ${{ steps.all.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

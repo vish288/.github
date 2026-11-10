@@ -14,6 +14,14 @@ on:
         description: "Upload coverage.xml to Codecov (advisory, never blocks)."
         type: boolean
         default: true
+      service:
+        description: "Server repo / distribution name, e.g. mcp-argocd; enables the conformance job."
+        type: string
+        default: ""
+      conformance:
+        description: "Run the MCP conformance suite at the 2026-07-28 requirements."
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -39,3 +47,64 @@ jobs:
         continue-on-error: true
         with:
           file: coverage.xml
+
+  conformance:
+    if: ${{ inputs.conformance && inputs.service != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Guard job.workflow_sha
+        env:
+          WF_SHA: ${{ job.workflow_sha }}
+          WF_REPO: ${{ job.workflow_repository }}
+        run: '[ -n "$WF_SHA" ] && [ -n "$WF_REPO" ] || { echo "::error::job.workflow_sha or job.workflow_repository is empty; cannot fetch CI scripts"; exit 1; }'
+      - name: Fetch shared CI scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: Fetch conformance suite
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: modelcontextprotocol/conformance
+          ref: c37eec888e1c6ff140af79987a40008548b7cc5f
+          path: .conformance
+          persist-credentials: false
+      - name: Build conformance suite
+        run: cd .conformance && npm ci && npm run build
+      - name: Start the server with dummy env
+        env:
+          SERVICE: ${{ inputs.service }}
+        run: |
+          python .ci/scripts/ci/conformance_env.py > /tmp/conformance.env
+          set -a; . /tmp/conformance.env; set +a
+          uv run "$SERVICE" --transport streamable-http --host 127.0.0.1 --port 3001 &
+          echo $! > /tmp/server.pid
+          timeout 30 bash -c 'until curl -sf http://127.0.0.1:3001/health; do sleep 1; done'
+      - name: Run conformance (2026-07-28 requirements)
+        # The exact conformance commit is pinned deliberately: the latest release (v0.1.16)
+        # predates --requirements and the 2026-07-28 revision. Bump it by hand together with a
+        # baseline prune: a baselined entry that later passes fails the run (stale baseline).
+        run: node .conformance/dist/index.js server --url http://127.0.0.1:3001/mcp --requirements 2026-07-28 --expected-failures .github/conformance-baseline.yml
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: conformance-results
+          path: results/
+          if-no-files-found: ignore
+      - name: Stop the server
+        if: always()
+        run: kill "$(cat /tmp/server.pid)" || true

@@ -168,6 +168,11 @@ jobs:
           data["version"] = v
           for pkg in data.get("packages", []):
               pkg["version"] = v
+              if pkg.get("registryType") == "oci":
+                  ident = pkg.get("identifier", "")
+                  # The oci tag lives in the identifier (registry/namespace/repo:tag).
+                  if ":" in ident.rsplit("/", 1)[-1]:
+                      pkg["identifier"] = ident.rsplit(":", 1)[0] + ":" + v
           with open("server.json", "w") as f:
               json.dump(data, f, indent=2)
               f.write("\n")

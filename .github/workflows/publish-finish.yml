@@ -1,10 +1,11 @@
 name: Publish (finish)
 
 # Phase 2 of the mcp-* publish pipeline, after the server stub's top-level `pypi` job has run
-# `pypa/gh-action-pypi-publish`: confirm the files are live on PyPI, then create the immutable
-# GitHub release from them and publish to the MCP registry. None of these needs PyPI's OIDC, so
-# they live here. Runs in the caller's context (github.ref_name is the tag, GITHUB_REPOSITORY
-# is the server); shared scripts come from .ci/ at this workflow's own commit.
+# `pypa/gh-action-pypi-publish`: confirm the files are live on PyPI, create the immutable
+# GitHub release from them, push the container image to GHCR, and publish to the MCP registry.
+# None of these needs PyPI's OIDC, so they live here. Runs in the caller's context
+# (github.ref_name is the tag, GITHUB_REPOSITORY is the server); shared scripts come from .ci/ at
+# this workflow's own commit.
 on:
   workflow_call:
     inputs:
@@ -33,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      has_oci: ${{ steps.oci.outputs.has_oci }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,6 +52,11 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .ci
           persist-credentials: false
+      - name: Detect an oci package
+        id: oci
+        run: |
+          has=$(python3 -c 'import json,sys;d=json.load(open("server.json"));print("true" if any(p.get("registryType")=="oci" for p in d.get("packages",[])) else "false")')
+          echo "has_oci=$has" >> "$GITHUB_OUTPUT"
       - name: Confirm on PyPI
         run: .ci/scripts/ci/state.sh pypi "$TAG" --wait 120 --require "done"
 
@@ -83,11 +91,107 @@ jobs:
         if: steps.check.outputs.state != 'done'
         run: .ci/scripts/ci/state.sh release-create "$TAG"
       - name: Confirm release
-        run: .ci/scripts/ci/state.sh release "$TAG" --require "done"
+        run: .ci/scripts/ci/state.sh release "$TAG" --wait 60 --require "done"
+
+  image:
+    needs: confirm-pypi
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Guard job.workflow_sha
+        env:
+          WF_SHA: ${{ job.workflow_sha }}
+          WF_REPO: ${{ job.workflow_repository }}
+        run: '[ -n "$WF_SHA" ] && [ -n "$WF_REPO" ] || { echo "::error::job.workflow_sha or job.workflow_repository is empty; cannot fetch CI scripts"; exit 1; }'
+      - name: Fetch shared CI scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ci
+          persist-credentials: false
+      - name: Version
+        id: ver
+        env:
+          REF: ${{ github.ref_name }}
+        run: echo "ver=${REF#v}" >> "$GITHUB_OUTPUT"
+      - name: Server name
+        id: srv
+        run: echo "name=$(jq -r .name server.json)" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image state (authenticated)
+        id: state
+        run: echo "state=$(.ci/scripts/ci/state.sh image-auth "$TAG")" >> "$GITHUB_OUTPUT"
+      - name: An oci package needs a Dockerfile
+        if: ${{ needs.confirm-pypi.outputs.has_oci == 'true' && steps.state.outputs.state == 'na' }}
+        run: |
+          echo "::error::server.json lists an oci package but the repo has no root Dockerfile"
+          exit 1
+      - name: Gate (fail_at test hook)
+        run: .ci/scripts/ci/state.sh gate image "${{ steps.state.outputs.state }}"
+      - name: Set up QEMU
+        if: steps.state.outputs.state == 'missing'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Set up Buildx
+        if: steps.state.outputs.state == 'missing'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Highest semver tag
+        id: highest
+        run: |
+          h=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/tags?per_page=100" | jq -r 'add // [] | .[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ "$TAG" = "$h" ]; then echo "latest=true" >> "$GITHUB_OUTPUT"; else echo "latest=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Tags
+        id: tags
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+          LATEST: ${{ steps.highest.outputs.latest }}
+        run: |
+          t="ghcr.io/$GITHUB_REPOSITORY:$VER"
+          [ "$LATEST" = true ] && t="$t"$'\n'"ghcr.io/$GITHUB_REPOSITORY:latest"
+          echo "tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$t" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+      - name: Build and push
+        id: build
+        if: steps.state.outputs.state == 'missing'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.ver }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+            io.modelcontextprotocol.server.name=${{ steps.srv.outputs.name }}
+      - name: Attest build provenance
+        if: steps.state.outputs.state == 'missing'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
   registry:
-    needs: [confirm-pypi, github-release]
-    if: ${{ !cancelled() && !inputs.dry_run && (inputs.pypi_state == 'done' || needs.confirm-pypi.result == 'success') }}
+    needs: [confirm-pypi, github-release, image]
+    if: ${{ !cancelled() && !inputs.dry_run && (inputs.pypi_state == 'done' || needs.confirm-pypi.result == 'success') && (needs.confirm-pypi.outputs.has_oci != 'true' || needs.image.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
