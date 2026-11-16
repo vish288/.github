@@ -106,6 +106,15 @@ EOF
   else
     echo "FAIL pin_install_snippets main"; fail=1
   fi
+  # No oci package (an image-only release, or a server with no image): must still exit 0.
+  mkdir "$d/srv2"
+  printf '{"packages":[{"identifier":"mcp-gitlab"}]}' > "$d/srv2/server.json"
+  printf 'uvx mcp-gitlab@0.1.0\n' > "$d/srv2/README.md"
+  if (cd "$d/srv2" && bash "$self" 1.2.3) && grep -q 'mcp-gitlab@1.2.3' "$d/srv2/README.md"; then
+    echo "ok   pin_install_snippets main (no oci)"
+  else
+    echo "FAIL pin_install_snippets main (no oci)"; fail=1
+  fi
   return "$fail"
 }
 
@@ -123,7 +132,11 @@ main() {
   # The GHCR image tag in README.md, when the server ships an oci package.
   local img
   img=$(jq -r '.packages[]? | select(.registryType=="oci") | .identifier' server.json | head -1 | sed 's/:[^:/]*$//')
-  [ -n "$img" ] && [ "$img" != null ] && pin_image "$img" "$version" README.md
+  # An `if`, not an `&&` chain: with no oci package the chain's status (1) would become main's,
+  # and as the script's last command it would fail the release with no message.
+  if [ -n "$img" ] && [ "$img" != null ]; then
+    pin_image "$img" "$version" README.md
+  fi
 }
 
 main "$@"
