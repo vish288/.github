@@ -167,12 +167,15 @@ jobs:
               data = json.load(f)
           data["version"] = v
           for pkg in data.get("packages", []):
-              pkg["version"] = v
               if pkg.get("registryType") == "oci":
+                  # The oci tag lives in the identifier (registry/namespace/repo:tag), and the
+                  # registry rejects a `version` field on oci packages, so drop it.
+                  pkg.pop("version", None)
                   ident = pkg.get("identifier", "")
-                  # The oci tag lives in the identifier (registry/namespace/repo:tag).
                   if ":" in ident.rsplit("/", 1)[-1]:
                       pkg["identifier"] = ident.rsplit(":", 1)[0] + ":" + v
+              else:
+                  pkg["version"] = v
           with open("server.json", "w") as f:
               json.dump(data, f, indent=2)
               f.write("\n")

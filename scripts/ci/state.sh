@@ -213,14 +213,21 @@ cmd_release_create() {
   "$RETRY" gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" -F draft=false -f make_latest="$latest" >/dev/null \
     || echo "::warning::publishing draft $id failed; the confirm step decides"
 }
-cmd_registry_publish() {
-  # The oci tag lives in the identifier (registry/namespace/repo:tag), so rewrite that suffix
-  # as well as the package version. The release commit is the real fix; this is a backstop.
-  jq --arg v "$VER" '
+rewrite_server_json() {   # VER: stdin server.json -> stdout, versions set for publish
+  # The oci tag lives in the identifier (registry/namespace/repo:tag). The registry rejects a
+  # `version` field on oci packages ("include version in 'identifier' instead"), so oci packages
+  # get the identifier tag rewritten and `version` removed; every other package gets `version`.
+  jq --arg v "$1" '
     .version=$v
-    | (.packages[]?.version)=$v
-    | (.packages[]? | select(.registryType=="oci") | .identifier) |= sub(":[^:/]*$"; ":" + $v)
-  ' server.json > server.json.tmp && mv server.json.tmp server.json
+    | .packages |= map(
+        if .registryType == "oci"
+        then (del(.version) | .identifier |= sub(":[^:/]*$"; ":" + $v))
+        else .version=$v end)
+  '
+}
+cmd_registry_publish() {
+  # The release commit is the real fix; this is a backstop for older tags.
+  rewrite_server_json "$VER" < server.json > server.json.tmp && mv server.json.tmp server.json
   mcp-publisher validate
   "$RETRY" bash -c 'mcp-publisher login github-oidc && mcp-publisher publish' \
     || echo "::warning::mcp-publisher publish failed; the confirm step decides"
@@ -327,6 +334,10 @@ STUB
   t imgauth-done-no-oci "done" "$got"
   got=$( cd "$wd"; export PATH="$gstub:$PATH" VER=1 GITHUB_REPOSITORY=o/n GITHUB_ACTOR=a GH_TOKEN=t; cmd_image_digest )
   t image-digest "sha256:deadbeef" "$got"
+  # registry-publish rewrite: pypi gets version, oci loses version and gets the identifier tag.
+  got=$(echo '{"version":"0.1.0","packages":[{"registryType":"pypi","identifier":"p","version":"0.1.0"},{"registryType":"oci","identifier":"ghcr.io/o/n:0.1.0","version":"0.1.0"}]}' \
+    | rewrite_server_json 2.0.0 | jq -c '[.version, .packages[0].version, (.packages[1]|has("version")), .packages[1].identifier]')
+  t rewrite-oci '["2.0.0","2.0.0",false,"ghcr.io/o/n:2.0.0"]' "$got"
   rm -rf "$gstub" "$wd"
   rm -rf "$stub"; rm -f "$body" "$n" "$polln"
   exit $bad
